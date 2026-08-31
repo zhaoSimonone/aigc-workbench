@@ -1,0 +1,443 @@
+const crypto = require('crypto');
+const fs = require('fs');
+const fsp = fs.promises;
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const express = require('express');
+const multer = require('multer');
+const bcrypt = require('bcryptjs');
+const { Pool } = require('pg');
+const COS = require('cos-nodejs-sdk-v5');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffprobePath = require('@ffprobe-installer/ffprobe').path;
+require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || path.resolve(process.cwd(), '.env') });
+
+const app = express();
+const port = Number(process.env.PORT || 18080);
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const uploadDir = process.env.UPLOAD_TMP_DIR || path.join(os.tmpdir(), 'aigc-shelf-uploads');
+const sessionDays = Number(process.env.SESSION_DAYS || 30);
+const bucket = process.env.TENCENT_COS_BUCKET;
+const region = process.env.TENCENT_COS_REGION || 'ap-guangzhou';
+const cos = new COS({
+  SecretId: process.env.TENCENT_COS_SECRET_ID,
+  SecretKey: process.env.TENCENT_COS_SECRET_KEY,
+  Protocol: 'https:',
+});
+const execFileAsync = promisify(execFile);
+
+app.disable('x-powered-by');
+app.use(express.json({ limit: '1mb' }));
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+const upload = multer({
+  dest: uploadDir,
+  limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024) },
+});
+
+function hashToken(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie || '';
+  const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function setSessionCookie(res, token, maxAge) {
+  const flags = [
+    `aigc_session=${encodeURIComponent(token)}`,
+    `Max-Age=${maxAge}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (process.env.NODE_ENV === 'production') flags.push('Secure');
+  res.setHeader('Set-Cookie', flags.join('; '));
+}
+
+async function requireUser(req, res, next) {
+  try {
+    const token = readCookie(req, 'aigc_session');
+    if (!token) return res.status(401).json({ error: '未登录' });
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name, u.email
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = $1 AND s.expires_at > now()`,
+      [hashToken(token)],
+    );
+    if (!rows[0]) return res.status(401).json({ error: '登录已过期' });
+    req.user = rows[0];
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+function publicUser(row) {
+  return { id: row.id, name: row.name, email: row.email };
+}
+
+function objectUrl(key) {
+  return new Promise((resolve, reject) => {
+    cos.getObjectUrl({ Bucket: bucket, Region: region, Key: key, Sign: true, Expires: 3600 }, (err, data) => {
+      if (err) reject(err);
+      else resolve(data.Url);
+    });
+  });
+}
+
+function putObject(key, filePath, contentType) {
+  return new Promise((resolve, reject) => {
+    cos.putObject({
+      Bucket: bucket,
+      Region: region,
+      Key: key,
+      Body: fs.createReadStream(filePath),
+      ContentType: contentType,
+    }, (err, data) => (err ? reject(err) : resolve(data)));
+  });
+}
+
+function headObject(key) {
+  return new Promise((resolve, reject) => {
+    cos.headObject({ Bucket: bucket, Region: region, Key: key }, (err, data) => (err ? reject(err) : resolve(data)));
+  });
+}
+
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function inspectVideo(filePath, previewPath) {
+  const [{ stdout: durationOutput }] = await Promise.all([
+    execFileAsync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 60000 }),
+    execFileAsync(ffmpegPath, ['-y', '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 }),
+  ]);
+  const duration = Number.parseFloat(String(durationOutput).trim());
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+function parseTags(value) {
+  if (Array.isArray(value)) return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))].slice(0, 30);
+  try {
+    const parsed = JSON.parse(value || '[]');
+    if (Array.isArray(parsed)) return parseTags(parsed);
+  } catch (_) {}
+  return String(value || '').split(/[,，\\s]+/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
+}
+
+function safeName(name) {
+  return String(name || '未命名素材').replace(/[\\\\/]+/g, '_').slice(0, 180) || '未命名素材';
+}
+
+async function hydrateAsset(row) {
+  const [url, thumbUrl] = await Promise.all([
+    row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream`) : objectUrl(row.object_key),
+    row.thumb_key ? objectUrl(row.thumb_key) : Promise.resolve(''),
+  ]);
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    source: row.source,
+    sourceUrl: row.source_url,
+    characterName: row.character_name || '',
+    src: url,
+    thumb: thumbUrl,
+    duration: row.duration_seconds ? formatDuration(row.duration_seconds) : row.type === 'video' ? '待识别' : null,
+    date: new Date(row.created_at).toISOString(),
+    size: formatBytes(Number(row.size_bytes)),
+    tags: row.tags || [],
+    favorite: row.favorite,
+    used: row.used,
+    folder: row.folder,
+    note: row.note,
+    parentAssetIds: row.parent_asset_ids || [],
+  };
+}
+
+async function assetQuery(id, userId) {
+  const result = await pool.query(
+    `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
+        COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids
+       FROM assets a
+       LEFT JOIN asset_tags at ON at.asset_id=a.id
+       LEFT JOIN tags t ON t.id=at.tag_id
+       LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
+      WHERE a.id=$1 AND a.user_id=$2 AND a.deleted_at IS NULL
+      GROUP BY a.id`,
+    [id, userId],
+  );
+  return result.rows[0];
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 KB';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds)));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+app.get('/api/health', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(503).json({ ok: false });
+  }
+});
+
+app.get('/api/auth/me', requireUser, (req, res) => res.json({ user: publicUser(req.user) }));
+
+app.post('/api/auth/register', async (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    if (!name || !email || password.length < 6) return res.status(400).json({ error: '请完整填写信息，密码至少需要 6 位' });
+    const passwordHash = await bcrypt.hash(password, 12);
+    const { rows } = await pool.query(
+      'INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING id,name,email',
+      [name, email, passwordHash],
+    );
+    const token = crypto.randomBytes(32).toString('hex');
+    await pool.query("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+($3 * interval '1 day'))", [hashToken(token), rows[0].id, sessionDays]);
+    setSessionCookie(res, token, sessionDays * 86400);
+    res.status(201).json({ user: publicUser(rows[0]) });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: '该邮箱已注册，请直接登录' });
+    next(error);
+  }
+});
+
+app.post('/api/auth/login', async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const { rows } = await pool.query('SELECT id,name,email,password_hash FROM users WHERE email=$1', [email]);
+    if (!rows[0] || !(await bcrypt.compare(password, rows[0].password_hash))) return res.status(401).json({ error: '邮箱或密码不正确' });
+    const token = crypto.randomBytes(32).toString('hex');
+    await pool.query("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+($3 * interval '1 day'))", [hashToken(token), rows[0].id, sessionDays]);
+    setSessionCookie(res, token, sessionDays * 86400);
+    res.json({ user: publicUser(rows[0]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/logout', async (req, res, next) => {
+  try {
+    const token = readCookie(req, 'aigc_session');
+    if (token) await pool.query('DELETE FROM sessions WHERE token_hash=$1', [hashToken(token)]);
+    setSessionCookie(res, '', 0);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/assets', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
+          COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids
+         FROM assets a
+         LEFT JOIN asset_tags at ON at.asset_id=a.id
+         LEFT JOIN tags t ON t.id=at.tag_id
+         LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
+        WHERE a.user_id=$1 AND a.deleted_at IS NULL
+        GROUP BY a.id
+        ORDER BY a.created_at DESC`,
+      [req.user.id],
+    );
+    res.json({ assets: await Promise.all(rows.map(hydrateAsset)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
+  try {
+    const row = await assetQuery(req.params.id, req.user.id);
+    if (!row) return res.status(404).json({ error: '素材不存在' });
+    const metadata = await headObject(row.object_key);
+    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    const range = req.headers.range;
+    let start = 0;
+    let end = Math.max(0, total - 1);
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match || (!match[1] && !match[2])) return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      if (match[1]) start = Number(match[1]);
+      if (match[2]) end = Number(match[2]);
+      else end = Math.min(total - 1, start + 4 * 1024 * 1024 - 1);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= total || end < start) {
+        return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      }
+      end = Math.min(end, total - 1);
+    }
+    const length = end - start + 1;
+    res.status(range ? 206 : 200);
+    res.set({
+      'Content-Type': row.content_type || 'video/mp4',
+      'Content-Length': String(length),
+      'Accept-Ranges': 'bytes',
+      'Content-Disposition': 'inline',
+      ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
+    });
+    const headers = range ? { Range: `bytes=${start}-${end}` } : {};
+    cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Headers: headers, Output: res }, (error) => {
+      if (error && !res.headersSent) next(error);
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/assets', requireUser, upload.single('file'), async (req, res, next) => {
+  let tempPath = req.file && req.file.path;
+  try {
+    if (!req.file) return res.status(400).json({ error: '请选择文件' });
+    const type = req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : '';
+    if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
+    const tags = parseTags(req.body.tags);
+    const source = String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入';
+    const sourceUrl = String(req.body.sourceUrl || '').trim().slice(0, 2000);
+    const characterName = String(req.body.characterName || '').trim().slice(0, 120);
+    const folder = String(req.body.folder || '灵感收集').trim().slice(0, 80) || '灵感收集';
+    const name = safeName(String(req.body.name || path.basename(req.file.originalname, path.extname(req.file.originalname))));
+    const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
+    await putObject(objectKey, tempPath, req.file.mimetype);
+    let thumbKey = null;
+    let durationSeconds = null;
+    if (type === 'video') {
+      const previewPath = `${tempPath}.jpg`;
+      try {
+        durationSeconds = await inspectVideo(tempPath, previewPath);
+        thumbKey = `${objectKey}.jpg`;
+        await putObject(thumbKey, previewPath, 'image/jpeg');
+      } catch (error) {
+        console.warn('Video preview generation skipped:', error.message);
+      } finally {
+        await fsp.unlink(previewPath).catch(() => {});
+      }
+    }
+    const sha256 = await hashFile(tempPath);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+        [req.user.id, name, type, source, sourceUrl, characterName, objectKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, folder, req.body.used === 'true', '新上传素材，等待补充备注。'],
+      );
+      for (const tag of tags.length ? tags : ['待整理']) {
+        const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [req.user.id, tag]);
+        await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [rows[0].id, tagRow.rows[0].id]);
+      }
+      const parentIds = parseTags(req.body.parentAssetIds);
+      for (const parentId of parentIds) {
+        await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, req.user.id]);
+      }
+      await client.query('COMMIT');
+      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
+      res.status(201).json({ asset: await hydrateAsset(hydrated.rows[0]) });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    next(error);
+  } finally {
+    if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
+  try {
+    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName'];
+    const fields = [];
+    const values = [];
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+        const dbKey = key === 'sourceUrl' ? 'source_url' : key === 'characterName' ? 'character_name' : key;
+        values.push(key === 'characterName' ? String(req.body[key] || '').trim().slice(0, 120) : req.body[key]);
+        fields.push(`${dbKey}=$${values.length}`);
+      }
+    }
+    if (!fields.length) return res.status(400).json({ error: '没有可更新字段' });
+    values.push(req.params.id, req.user.id);
+    const { rows } = await pool.query(`UPDATE assets SET ${fields.join(', ')} WHERE id=$${values.length - 1} AND user_id=$${values.length} AND deleted_at IS NULL RETURNING *`, values);
+    if (!rows[0]) return res.status(404).json({ error: '素材不存在' });
+    const hydrated = await assetQuery(rows[0].id, req.user.id);
+    res.json({ asset: await hydrateAsset(hydrated) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/assets/:id/tags', requireUser, async (req, res, next) => {
+  try {
+    const tags = parseTags(req.body.tags);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const exists = await client.query('SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL', [req.params.id, req.user.id]);
+      if (!exists.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: '素材不存在' });
+      }
+      await client.query('DELETE FROM asset_tags WHERE asset_id=$1', [req.params.id]);
+      for (const tag of tags) {
+        const row = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [req.user.id, tag]);
+        await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2)', [req.params.id, row.rows[0].id]);
+      }
+      await client.query('COMMIT');
+      res.status(204).end();
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use((error, _req, res, _next) => {
+  console.error(error);
+  res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 500).json({ error: error.code === 'LIMIT_FILE_SIZE' ? '文件超过 2 GB 限制' : '服务器内部错误' });
+});
+
+async function start() {
+  await fsp.mkdir(uploadDir, { recursive: true });
+  const schema = await fsp.readFile(path.join(__dirname, '..', 'schema.sql'), 'utf8');
+  await pool.query(schema);
+  app.listen(port, '0.0.0.0', () => console.log(`AIGC Shelf API listening on ${port}`));
+}
+
+start().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
