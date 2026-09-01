@@ -7,6 +7,7 @@
 - 真实图片与视频素材预览，点击打开详情抽屉
 - 收藏、标签、来源、使用状态、备注和文件信息展示
 - 拖拽或选择本地图片/视频上传到腾讯云 COS，并保存素材元数据
+- 登录后可通过 `POST /api/assets/import-urls` 批量导入可访问的 OSS/对象存储视频链接
 - 视频预览使用服务端同源 Range 流，兼容移动端在线播放
 - 注册/登录与按账号隔离的数据，可将创作作品关联到多个参考素材
 - 桌面端与移动端布局
@@ -45,5 +46,34 @@ node src/index.js
 2. 服务端接收 `multipart/form-data`，调用腾讯云 COS SDK 上传并设置正确的 `ContentType`。
 3. 返回对象 key、大小、哈希和短期签名 URL；前端用返回值创建素材记录。
 4. COS 桶建议关闭匿名写入，仅对应用服务账号授予指定前缀的读写权限。
+
+## 批量导入视频链接 API
+
+接口需要登录会话 Cookie：
+
+```http
+POST /api/assets/import-urls
+Content-Type: application/json
+```
+
+请求体为 `{ "items": [...] }`，单批最多 50 条；也可以只传 `{ "urls": ["..."] }` 快速导入。每项至少包含 `url`，也兼容 `ossUrl`；可同时传入素材元数据：
+
+```json
+{
+  "items": [
+    {
+      "url": "https://your-bucket.oss-cn-shanghai.aliyuncs.com/demo/a.mp4?签名参数",
+      "name": "门店开场参考",
+      "source": "抖音",
+      "sourceUrl": "https://v.douyin.com/example/",
+      "tags": ["开场", "运镜"],
+      "folder": "灵感收集",
+      "used": false
+    }
+  ]
+}
+```
+
+服务端会下载链接内容、上传到腾讯云 COS、生成视频封面和时长，并将素材写入当前账号的数据库。返回 `results` 数组，每条包含 `ok` 和 `asset` 或 `error`，单条失败不会影响其他条目。链接需要在服务器上可访问，支持 HTTP(S) 视频地址（包括带签名参数的私有 OSS 链接）；原链接会保存到素材的“原视频链接”。
 
 `.env.example` 已写入桶名和区域占位符（当前桶实际地域为 `ap-shanghai`）。域名 `aigc.chatcanvas.online` 可在 Nginx 中反向代理到 Vite 构建产物和服务端 API；不要把 `/Users/simon/Desktop/dev/cloud/tencent` 下的凭据目录复制到仓库。

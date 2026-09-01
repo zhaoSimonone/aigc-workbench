@@ -5,6 +5,8 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const express = require('express');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
@@ -148,6 +150,99 @@ function parseTags(value) {
 
 function safeName(name) {
   return String(name || '未命名素材').replace(/[\\\\/]+/g, '_').slice(0, 180) || '未命名素材';
+}
+
+function remoteMimeType(url, contentType) {
+  const normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (normalized.startsWith('video/')) return normalized;
+  const pathname = new URL(url).pathname.toLowerCase();
+  const extensionMap = { '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.m4v': 'video/x-m4v', '.webm': 'video/webm', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska' };
+  return extensionMap[path.extname(pathname)] || normalized;
+}
+
+async function downloadRemoteVideo(url, destination) {
+  let response;
+  try {
+    response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
+  } catch (error) {
+    throw new Error(`远程地址无法访问：${error.message}`);
+  }
+  if (!response.ok || !response.body) throw new Error(`远程地址返回 HTTP ${response.status}`);
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024);
+  if (contentLength > maxBytes) throw new Error('远程视频超过 2 GB 限制');
+  let size = 0;
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      size += chunk.length;
+      if (size > maxBytes) callback(new Error('远程视频超过 2 GB 限制'));
+      else callback(null, chunk);
+    },
+  });
+  await pipeline(response.body, limiter, fs.createWriteStream(destination));
+  return { size, mimeType: remoteMimeType(url, response.headers.get('content-type')) };
+}
+
+async function persistAsset({ userId, tempPath, originalName, mimeType, metadata = {} }) {
+  const type = mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('video/') ? 'video' : '';
+  if (!type) throw new Error('仅支持图片和视频文件');
+  const tags = parseTags(metadata.tags);
+  const source = String(metadata.source || 'OSS 导入').trim().slice(0, 120) || 'OSS 导入';
+  const sourceUrl = String(metadata.sourceUrl || '').trim().slice(0, 2000);
+  const characterName = String(metadata.characterName || '').trim().slice(0, 120);
+  const requestedFolder = String(metadata.folder || '灵感收集').trim();
+  const folder = (requestedFolder === '成片' ? '我的创作' : requestedFolder).slice(0, 80) || '灵感收集';
+  const characterCategory = String(metadata.characterCategory || '').trim().slice(0, 40);
+  const name = safeName(String(metadata.name || path.basename(originalName, path.extname(originalName))));
+  const objectKey = `${userId}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalName)}`;
+  let thumbKey = null;
+  try {
+    await putObject(objectKey, tempPath, mimeType);
+    let durationSeconds = null;
+    if (type === 'video') {
+      const previewPath = `${tempPath}.jpg`;
+      try {
+        durationSeconds = await inspectVideo(tempPath, previewPath);
+        thumbKey = `${objectKey}.jpg`;
+        await putObject(thumbKey, previewPath, 'image/jpeg');
+      } catch (error) {
+        console.warn('Video preview generation skipped:', error.message);
+      } finally {
+        await fsp.unlink(previewPath).catch(() => {});
+      }
+    }
+    const sha256 = await hashFile(tempPath);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (folder === '角色设定' && characterName) {
+        await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
+      }
+      const { rows } = await client.query(
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, fs.statSync(tempPath).size, sha256, durationSeconds, folder, metadata.used === true || String(metadata.used) === 'true', '新上传素材，等待补充备注。'],
+      );
+      for (const tag of tags.length ? tags : ['待整理']) {
+        const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
+        await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [rows[0].id, tagRow.rows[0].id]);
+      }
+      for (const parentId of parseTags(metadata.parentAssetIds)) {
+        await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, userId]);
+      }
+      await client.query('COMMIT');
+      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
+      return await hydrateAsset(hydrated.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await Promise.all([deleteObject(objectKey).catch(() => {}), deleteObject(thumbKey).catch(() => {})]);
+    throw error;
+  }
 }
 
 async function hydrateAsset(row) {
@@ -506,6 +601,52 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
     next(error);
   } finally {
     if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.post('/api/assets/import-urls', requireUser, async (req, res, next) => {
+  try {
+    const items = Array.isArray(req.body?.items)
+      ? req.body.items
+      : Array.isArray(req.body?.urls)
+        ? req.body.urls.map((url) => ({ url }))
+        : Array.isArray(req.body?.ossUrls)
+          ? req.body.ossUrls.map((url) => ({ url }))
+          : [];
+    const maxItems = Number(process.env.MAX_BATCH_IMPORT_ITEMS || 50);
+    if (!items.length) return res.status(400).json({ error: 'items 不能为空，至少传入一个视频链接' });
+    if (items.length > maxItems) return res.status(400).json({ error: `单批最多导入 ${maxItems} 个视频` });
+    const results = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index] || {};
+      const url = String(item.url || item.ossUrl || item.oss_url || '').trim();
+      try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('只支持 HTTP(S) 链接');
+        const tempPath = path.join(uploadDir, `remote-${crypto.randomUUID()}`);
+        try {
+          const downloaded = await downloadRemoteVideo(url, tempPath);
+          if (!downloaded.mimeType.startsWith('video/')) throw new Error('链接内容不是可识别的视频文件');
+          const originalName = safeName(String(item.fileName || item.filename || path.basename(parsed.pathname) || `remote-${index + 1}.mp4`));
+          const asset = await persistAsset({
+            userId: req.user.id,
+            tempPath,
+            originalName,
+            mimeType: downloaded.mimeType,
+            metadata: { ...item, source: item.source || 'OSS 导入', sourceUrl: item.sourceUrl || url },
+          });
+          results.push({ index, url, ok: true, asset });
+        } finally {
+          await fsp.unlink(tempPath).catch(() => {});
+        }
+      } catch (error) {
+        results.push({ index, url, ok: false, error: error.message || '导入失败' });
+      }
+    }
+    const succeeded = results.filter((item) => item.ok).length;
+    res.status(succeeded ? 200 : 422).json({ total: items.length, succeeded, failed: items.length - succeeded, results });
+  } catch (error) {
+    next(error);
   }
 });
 
