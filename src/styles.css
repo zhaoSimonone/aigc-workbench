@@ -1301,6 +1301,33 @@ button {
   font-size: 10px;
   font-weight: 400;
 }
+.replace-file-field {
+  gap: 8px !important;
+}
+.replace-file-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  color: #59625e;
+  background: #fff;
+  border: 1px solid #dedfda;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.replace-file-control:hover {
+  color: #a65343;
+  border-color: #efcfc7;
+  background: #fff9f7;
+}
 .edit-used-toggle {
   grid-column: 1 / -1;
   display: flex;

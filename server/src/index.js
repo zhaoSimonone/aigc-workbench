@@ -111,6 +111,13 @@ function headObject(key) {
   });
 }
 
+function deleteObject(key) {
+  if (!key) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    cos.deleteObject({ Bucket: bucket, Region: region, Key: key }, (err, data) => (err ? reject(err) : resolve(data)));
+  });
+}
+
 function hashFile(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -435,6 +442,67 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
       client.release();
     }
   } catch (error) {
+    next(error);
+  } finally {
+    if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req, res, next) => {
+  let tempPath = req.file && req.file.path;
+  let uploadedKey = '';
+  let uploadedThumbKey = '';
+  try {
+    if (!req.file) return res.status(400).json({ error: '请选择要替换的文件' });
+    const current = await assetQuery(req.params.id, req.user.id);
+    if (!current) return res.status(404).json({ error: '素材不存在' });
+    const type = req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : '';
+    if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
+    if (type !== current.type) return res.status(400).json({ error: `只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件` });
+
+    uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
+    await putObject(uploadedKey, tempPath, req.file.mimetype);
+    let thumbKey = null;
+    let durationSeconds = null;
+    if (type === 'video') {
+      const previewPath = `${tempPath}.jpg`;
+      try {
+        durationSeconds = await inspectVideo(tempPath, previewPath);
+        thumbKey = `${uploadedKey}.jpg`;
+        uploadedThumbKey = thumbKey;
+        await putObject(thumbKey, previewPath, 'image/jpeg');
+      } catch (error) {
+        console.warn('Replacement video preview generation skipped:', error.message);
+      } finally {
+        await fsp.unlink(previewPath).catch(() => {});
+      }
+    }
+    const sha256 = await hashFile(tempPath);
+    const { rows } = await pool.query(
+      `UPDATE assets
+          SET object_key=$1, thumb_key=$2, content_type=$3, size_bytes=$4, sha256=$5, duration_seconds=$6
+        WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL
+        RETURNING *`,
+      [uploadedKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, req.params.id, req.user.id],
+    );
+    if (!rows[0]) {
+      await Promise.all([
+        deleteObject(uploadedKey).catch(() => {}),
+        deleteObject(uploadedThumbKey).catch(() => {}),
+      ]);
+      return res.status(404).json({ error: '素材不存在' });
+    }
+    const hydrated = await assetQuery(req.params.id, req.user.id);
+    await Promise.all([
+      deleteObject(current.object_key).catch((error) => console.warn('Old asset cleanup skipped:', error.message)),
+      deleteObject(current.thumb_key).catch((error) => console.warn('Old thumbnail cleanup skipped:', error.message)),
+    ]);
+    res.json({ asset: await hydrateAsset(hydrated) });
+  } catch (error) {
+    await Promise.all([
+      deleteObject(uploadedKey).catch(() => {}),
+      deleteObject(uploadedThumbKey).catch(() => {}),
+    ]);
     next(error);
   } finally {
     if (tempPath) await fsp.unlink(tempPath).catch(() => {});

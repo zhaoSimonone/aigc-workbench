@@ -634,6 +634,21 @@ function Workspace({ user, onLogout }) {
       throw error;
     }
   };
+  const replaceAssetFile = async (id, file) => {
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const payload = await apiFetch(`/assets/${id}/file`, { method: "POST", body: form });
+      const updated = normaliseAsset(payload.asset);
+      setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
+      setSelected((item) => (item?.id === id ? updated : item));
+      setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
+      return updated;
+    } catch (error) {
+      setLoadError(error.message);
+      throw error;
+    }
+  };
   const deleteAsset = async (id) => {
     try {
       await apiFetch(`/assets/${id}`, { method: "DELETE" });
@@ -1189,6 +1204,7 @@ function Workspace({ user, onLogout }) {
           asset={editingAsset}
           onClose={() => setEditingAsset(null)}
           onSave={(fields) => saveAssetEdit(editingAsset.id, fields)}
+          onReplace={(file) => replaceAssetFile(editingAsset.id, file)}
         />
       )}
     </div>
@@ -1663,7 +1679,7 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
   );
 }
 
-function EditAssetModal({ asset, onClose, onSave }) {
+function EditAssetModal({ asset, onClose, onSave, onReplace }) {
   const [name, setName] = useState(asset.name || "");
   const [source, setSource] = useState(asset.source || "");
   const [sourceUrl, setSourceUrl] = useState(asset.sourceUrl || "");
@@ -1673,6 +1689,7 @@ function EditAssetModal({ asset, onClose, onSave }) {
   const [folder, setFolder] = useState(asset.folder || "灵感收集");
   const [note, setNote] = useState(asset.note || "");
   const [used, setUsed] = useState(Boolean(asset.used));
+  const [replacementFile, setReplacementFile] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event) => {
@@ -1694,6 +1711,7 @@ function EditAssetModal({ asset, onClose, onSave }) {
     setSaving(true);
     setError("");
     try {
+      if (replacementFile) await onReplace?.(replacementFile);
       await onSave({
         name: trimmedName,
         source: source.trim() || "本地导入",
@@ -1718,13 +1736,27 @@ function EditAssetModal({ asset, onClose, onSave }) {
           <div>
             <p className="eyebrow">EDIT ASSET</p>
             <h2>编辑素材</h2>
-            <p className="modal-subtitle">修改标题、来源和创作信息，保存后会同步到云端。</p>
+            <p className="modal-subtitle">修改文件、标题、来源和创作信息，保存后会同步到云端。</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭">
             <X size={19} />
           </button>
         </div>
         <div className="edit-form-grid">
+          <label className="edit-field-wide replace-file-field">
+            {asset.type === "video" ? "替换视频文件" : "替换图片文件"}
+            <input
+              type="file"
+              hidden
+              accept={asset.type === "video" ? "video/*" : "image/*"}
+              onChange={(event) => setReplacementFile(event.target.files?.[0] || null)}
+            />
+            <span className="replace-file-control">
+              <Upload size={15} />
+              {replacementFile ? replacementFile.name : "选择新的文件"}
+            </span>
+            <small>只支持替换为同类型文件；视频会重新生成封面和时长，原有信息和关联不变。</small>
+          </label>
           <label className="edit-field-wide">
             标题名称
             <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
