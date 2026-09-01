@@ -155,6 +155,7 @@ async function hydrateAsset(row) {
     source: row.source,
     sourceUrl: row.source_url,
     characterName: row.character_name || '',
+    characterCategory: row.character_category || '',
     src: url,
     thumb: thumbUrl,
     duration: row.duration_seconds ? formatDuration(row.duration_seconds) : row.type === 'video' ? '待识别' : null,
@@ -166,17 +167,20 @@ async function hydrateAsset(row) {
     folder: row.folder,
     note: row.note,
     parentAssetIds: row.parent_asset_ids || [],
+    derivedAssetIds: row.derived_asset_ids || [],
   };
 }
 
 async function assetQuery(id, userId) {
   const result = await pool.query(
     `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
-        COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids
+        COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
+        COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
        FROM assets a
        LEFT JOIN asset_tags at ON at.asset_id=a.id
        LEFT JOIN tags t ON t.id=at.tag_id
        LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
+       LEFT JOIN asset_relations d ON d.source_asset_id=a.id
       WHERE a.id=$1 AND a.user_id=$2 AND a.deleted_at IS NULL
       GROUP BY a.id`,
     [id, userId],
@@ -258,11 +262,13 @@ app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
-          COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids
+          COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
+          COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
          FROM assets a
          LEFT JOIN asset_tags at ON at.asset_id=a.id
          LEFT JOIN tags t ON t.id=at.tag_id
          LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
+         LEFT JOIN asset_relations d ON d.source_asset_id=a.id
         WHERE a.user_id=$1 AND a.deleted_at IS NULL
         GROUP BY a.id
         ORDER BY a.created_at DESC`,
@@ -312,6 +318,28 @@ app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
   }
 });
 
+app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
+  try {
+    const row = await assetQuery(req.params.id, req.user.id);
+    if (!row) return res.status(404).json({ error: '素材不存在' });
+    const metadata = await headObject(row.object_key);
+    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
+    const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
+    const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+    res.set({
+      'Content-Type': row.content_type || 'application/octet-stream',
+      'Content-Length': String(total),
+      'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}`,
+    });
+    cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Output: res }, (error) => {
+      if (error && !res.headersSent) next(error);
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/assets', requireUser, upload.single('file'), async (req, res, next) => {
   let tempPath = req.file && req.file.path;
   try {
@@ -322,7 +350,9 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     const source = String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入';
     const sourceUrl = String(req.body.sourceUrl || '').trim().slice(0, 2000);
     const characterName = String(req.body.characterName || '').trim().slice(0, 120);
-    const folder = String(req.body.folder || '灵感收集').trim().slice(0, 80) || '灵感收集';
+    const requestedFolder = String(req.body.folder || '灵感收集').trim();
+    const folder = (requestedFolder === '成片' ? '我的创作' : requestedFolder).slice(0, 80) || '灵感收集';
+    const characterCategory = String(req.body.characterCategory || '').trim().slice(0, 40);
     const name = safeName(String(req.body.name || path.basename(req.file.originalname, path.extname(req.file.originalname))));
     const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
     await putObject(objectKey, tempPath, req.file.mimetype);
@@ -345,9 +375,9 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     try {
       await client.query('BEGIN');
       const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-        [req.user.id, name, type, source, sourceUrl, characterName, objectKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, folder, req.body.used === 'true', '新上传素材，等待补充备注。'],
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [req.user.id, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, folder, req.body.used === 'true', '新上传素材，等待补充备注。'],
       );
       for (const tag of tags.length ? tags : ['待整理']) {
         const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [req.user.id, tag]);
@@ -358,7 +388,7 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
         await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, req.user.id]);
       }
       await client.query('COMMIT');
-      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
+      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
       res.status(201).json({ asset: await hydrateAsset(hydrated.rows[0]) });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -375,13 +405,20 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
 
 app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
   try {
-    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName'];
+    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory'];
     const fields = [];
     const values = [];
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) {
-        const dbKey = key === 'sourceUrl' ? 'source_url' : key === 'characterName' ? 'character_name' : key;
-        values.push(key === 'characterName' ? String(req.body[key] || '').trim().slice(0, 120) : req.body[key]);
+        const dbKey = key === 'sourceUrl' ? 'source_url' : key === 'characterName' ? 'character_name' : key === 'characterCategory' ? 'character_category' : key;
+        const value = key === 'characterName'
+          ? String(req.body[key] || '').trim().slice(0, 120)
+          : key === 'characterCategory'
+            ? String(req.body[key] || '').trim().slice(0, 40)
+            : key === 'folder' && String(req.body[key]) === '成片'
+              ? '我的创作'
+              : req.body[key];
+        values.push(value);
         fields.push(`${dbKey}=$${values.length}`);
       }
     }
@@ -391,6 +428,103 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
     if (!rows[0]) return res.status(404).json({ error: '素材不存在' });
     const hydrated = await assetQuery(rows[0].id, req.user.id);
     res.json({ asset: await hydrateAsset(hydrated) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/assets/:id', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE assets SET deleted_at=now() WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL RETURNING id',
+      [req.params.id, req.user.id],
+    );
+    if (!rows[0]) return res.status(404).json({ error: '素材不存在' });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function assertOwnedAsset(assetId, userId) {
+  const { rows } = await pool.query(
+    'SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL',
+    [assetId, userId],
+  );
+  return rows[0];
+}
+
+function publicComment(row) {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    content: row.content,
+    author: row.author_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+app.get('/api/assets/:id/comments', requireUser, async (req, res, next) => {
+  try {
+    if (!await assertOwnedAsset(req.params.id, req.user.id)) return res.status(404).json({ error: '素材不存在' });
+    const { rows } = await pool.query(
+      `SELECT c.*, u.name AS author_name
+         FROM asset_comments c JOIN users u ON u.id=c.user_id
+        WHERE c.asset_id=$1 AND c.user_id=$2
+        ORDER BY c.created_at DESC`,
+      [req.params.id, req.user.id],
+    );
+    res.json({ comments: rows.map(publicComment) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/assets/:id/comments', requireUser, async (req, res, next) => {
+  try {
+    if (!await assertOwnedAsset(req.params.id, req.user.id)) return res.status(404).json({ error: '素材不存在' });
+    const content = String(req.body.content || '').trim();
+    if (!content) return res.status(400).json({ error: '评论内容不能为空' });
+    if (content.length > 5000) return res.status(400).json({ error: '评论最多 5000 个字符' });
+    const { rows } = await pool.query(
+      `INSERT INTO asset_comments(asset_id,user_id,content)
+       VALUES($1,$2,$3)
+       RETURNING id,asset_id,content,created_at,updated_at`,
+      [req.params.id, req.user.id, content],
+    );
+    res.status(201).json({ comment: publicComment({ ...rows[0], author_name: req.user.name }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/comments/:id', requireUser, async (req, res, next) => {
+  try {
+    const content = String(req.body.content || '').trim();
+    if (!content) return res.status(400).json({ error: '评论内容不能为空' });
+    if (content.length > 5000) return res.status(400).json({ error: '评论最多 5000 个字符' });
+    const { rows } = await pool.query(
+      `UPDATE asset_comments c SET content=$1, updated_at=now()
+        WHERE c.id=$2 AND c.user_id=$3
+        RETURNING c.id,c.asset_id,c.content,c.created_at,c.updated_at`,
+      [content, req.params.id, req.user.id],
+    );
+    if (!rows[0]) return res.status(404).json({ error: '评论不存在' });
+    res.json({ comment: publicComment({ ...rows[0], author_name: req.user.name }) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/comments/:id', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      'DELETE FROM asset_comments WHERE id=$1 AND user_id=$2 RETURNING id',
+      [req.params.id, req.user.id],
+    );
+    if (!rows[0]) return res.status(404).json({ error: '评论不存在' });
+    res.status(204).end();
   } catch (error) {
     next(error);
   }

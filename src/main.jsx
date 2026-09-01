@@ -6,6 +6,7 @@ import {
   Bell,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleCheck,
   Clock3,
   Cloud,
@@ -26,6 +27,7 @@ import {
   LogIn,
   LogOut,
   Menu,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Play,
@@ -46,6 +48,8 @@ import "./styles.css";
 
 const media = "/media/";
 const API_BASE = "/api";
+const LIBRARY_FOLDERS = ["灵感收集", "我的创作", "角色设定", "项目资料"];
+const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
 
 const seedAssets = [
   {
@@ -168,7 +172,7 @@ const seedAssets = [
     thumb: `${media}persona-reference.png`,
     favorite: false,
     used: true,
-    folder: "成片",
+    folder: "我的创作",
     note: "留白较多，方便替换成自己的台词。",
   },
   {
@@ -213,6 +217,9 @@ function normaliseAsset(asset) {
     date: created && !Number.isNaN(created.valueOf()) ? formatAssetDate(created) : asset.date || "刚刚",
     createdAt: asset.date,
     tags: Array.isArray(asset.tags) ? asset.tags : [],
+    characterCategory: asset.characterCategory || "",
+    parentAssetIds: Array.isArray(asset.parentAssetIds) ? asset.parentAssetIds : [],
+    derivedAssetIds: Array.isArray(asset.derivedAssetIds) ? asset.derivedAssetIds : [],
   };
 }
 
@@ -409,11 +416,13 @@ function Workspace({ user, onLogout }) {
   const [loadError, setLoadError] = useState("");
   const [activeFolder, setActiveFolder] = useState("全部素材");
   const [activeCharacter, setActiveCharacter] = useState("");
+  const [activeCharacterCategory, setActiveCharacterCategory] = useState("");
   const [activeFilter, setActiveFilter] = useState("全部");
   const [activeTag, setActiveTag] = useState("");
   const [tagOpen, setTagOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
+  const [detailTrail, setDetailTrail] = useState([]);
   const [showUpload, setShowUpload] = useState(false);
   const [editingAsset, setEditingAsset] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
@@ -438,8 +447,8 @@ function Workspace({ user, onLogout }) {
         icon: Sparkles,
       },
       {
-        label: "成片",
-        count: assets.filter((item) => item.folder === "成片").length,
+        label: "我的创作",
+        count: assets.filter((item) => item.folder === "我的创作" || item.folder === "成片").length,
         icon: Play,
       },
       {
@@ -459,11 +468,14 @@ function Workspace({ user, onLogout }) {
     const normalized = query.trim().toLowerCase();
     const result = assets.filter((asset) => {
       const inFolder =
-        activeFolder === "全部素材" || asset.folder === activeFolder;
+        activeFolder === "全部素材" ||
+        (activeFolder === "我的创作" ? (asset.folder === "我的创作" || asset.folder === "成片") : asset.folder === activeFolder);
       const inCharacter =
         activeFolder !== "角色设定" ||
         !activeCharacter ||
-        (activeCharacter === "未命名角色" ? !asset.characterName : asset.characterName === activeCharacter);
+        (activeCharacter === "待归类人物" || activeCharacter === "未命名角色" ? !asset.characterName : asset.characterName === activeCharacter);
+      const inCharacterCategory =
+        activeFolder !== "角色设定" || !activeCharacterCategory || asset.characterCategory === activeCharacterCategory;
       const inType =
         activeFilter === "全部" ||
         (activeFilter === "视频" && asset.type === "video") ||
@@ -476,14 +488,14 @@ function Workspace({ user, onLogout }) {
         `${asset.name} ${asset.source} ${asset.tags.join(" ")}`
           .toLowerCase()
           .includes(normalized);
-      return inFolder && inCharacter && inType && inTag && inSearch;
+      return inFolder && inCharacter && inCharacterCategory && inType && inTag && inSearch;
     });
     return [...result].sort((a, b) =>
       sort === "名称"
         ? a.name.localeCompare(b.name, "zh")
         : new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
     );
-  }, [assets, activeFolder, activeFilter, activeTag, query, sort]);
+  }, [assets, activeFolder, activeCharacter, activeCharacterCategory, activeFilter, activeTag, query, sort]);
   const tagOptions = useMemo(
     () =>
       [...new Set(assets.flatMap((asset) => asset.tags))].sort((a, b) =>
@@ -495,7 +507,7 @@ function Workspace({ user, onLogout }) {
     if (activeFolder !== "角色设定" || activeCharacter) return [];
     const groups = new Map();
     filteredAssets.forEach((asset) => {
-      const name = asset.characterName || "未命名角色";
+      const name = asset.characterName || "待归类人物";
       const existing = groups.get(name) || { name, assets: [] };
       existing.assets.push(asset);
       groups.set(name, existing);
@@ -504,9 +516,14 @@ function Workspace({ user, onLogout }) {
       .map((group) => ({
         ...group,
         count: group.assets.length,
-        cover: group.assets.find((asset) => asset.thumb)?.thumb || "",
+        cover: group.assets.find((asset) => asset.thumb || asset.src)?.thumb || group.assets.find((asset) => asset.src)?.src || "",
         videoCount: group.assets.filter((asset) => asset.type === "video").length,
         imageCount: group.assets.filter((asset) => asset.type === "image").length,
+        categoryCounts: group.assets.reduce((counts, asset) => {
+          const category = asset.characterCategory || "未分类";
+          counts[category] = (counts[category] || 0) + 1;
+          return counts;
+        }, {}),
       }))
       .sort((a, b) => a.name.localeCompare(b.name, "zh"));
   }, [filteredAssets, activeFolder, activeCharacter]);
@@ -519,9 +536,24 @@ function Workspace({ user, onLogout }) {
       const updated = normaliseAsset(payload.asset);
       setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
       setSelected((item) => (item?.id === id ? updated : item));
+      setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
     } catch (error) {
       setLoadError(error.message);
     }
+  };
+  const openAsset = (asset) => {
+    setDetailTrail([]);
+    setSelected(asset);
+  };
+  const openRelatedAsset = (asset) => {
+    setDetailTrail((trail) => (selected ? [...trail, selected] : trail));
+    setSelected(asset);
+  };
+  const backToPreviousAsset = () => {
+    const previous = detailTrail[detailTrail.length - 1];
+    if (!previous) return;
+    setDetailTrail((trail) => trail.slice(0, -1));
+    setSelected(previous);
   };
   const handleUpload = async (files, metadata) => {
     setUploading(true);
@@ -533,6 +565,8 @@ function Workspace({ user, onLogout }) {
         form.append("file", file);
         form.append("source", metadata.source || "本地导入");
         form.append("sourceUrl", metadata.sourceUrl || "");
+        form.append("characterName", metadata.characterName || "");
+        form.append("characterCategory", metadata.characterCategory || "");
         form.append("tags", JSON.stringify(metadata.tags || []));
         form.append("used", String(Boolean(metadata.used)));
         form.append("folder", metadata.folder || "灵感收集");
@@ -572,6 +606,16 @@ function Workspace({ user, onLogout }) {
       throw error;
     }
   };
+  const deleteAsset = async (id) => {
+    try {
+      await apiFetch(`/assets/${id}`, { method: "DELETE" });
+      setAssets((items) => items.filter((item) => item.id !== id));
+      setSelected(null);
+      setDetailTrail([]);
+    } catch (error) {
+      setLoadError(error.message);
+    }
+  };
   const total = assets.length;
   const videoCount = assets.filter((item) => item.type === "video").length;
   const imageCount = assets.filter((item) => item.type === "image").length;
@@ -608,6 +652,9 @@ function Workspace({ user, onLogout }) {
   ];
   const libraryTitle = activeCharacter ? `角色设定 / ${activeCharacter}` : activeFolder;
   const isRoleAlbumView = activeFolder === "角色设定" && !activeCharacter;
+  const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
+    ? activeFolder
+    : "灵感收集";
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
@@ -638,6 +685,8 @@ function Workspace({ user, onLogout }) {
               onClick={() => {
                 setActiveFolder(label);
                 setActiveCharacter("");
+                setActiveCharacterCategory("");
+                setActiveTag("");
                 setActiveFilter("全部");
                 setMobileNav(false);
               }}
@@ -660,6 +709,8 @@ function Workspace({ user, onLogout }) {
               setActiveFilter("已收藏");
               setActiveFolder("全部素材");
               setActiveCharacter("");
+              setActiveCharacterCategory("");
+              setActiveTag("");
               setMobileNav(false);
             }}
           >
@@ -675,6 +726,8 @@ function Workspace({ user, onLogout }) {
               setActiveFilter("已使用");
               setActiveFolder("全部素材");
               setActiveCharacter("");
+              setActiveCharacterCategory("");
+              setActiveTag("");
               setMobileNav(false);
             }}
           >
@@ -688,6 +741,8 @@ function Workspace({ user, onLogout }) {
               setActiveFolder("全部素材");
               setActiveFilter("全部");
               setActiveCharacter("");
+              setActiveCharacterCategory("");
+              setActiveTag("");
               setMobileNav(false);
             }}
           >
@@ -700,6 +755,8 @@ function Workspace({ user, onLogout }) {
               setActiveFolder("全部素材");
               setActiveFilter("全部");
               setActiveCharacter("");
+              setActiveCharacterCategory("");
+              setActiveTag("");
               setMobileNav(false);
             }}
           >
@@ -845,11 +902,11 @@ function Workspace({ user, onLogout }) {
                   </span>
                 </h2>
                 {activeCharacter && (
-                  <button className="album-back-button" onClick={() => setActiveCharacter("")}>
+                  <button className="album-back-button" onClick={() => { setActiveCharacter(""); setActiveCharacterCategory(""); }}>
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>你的创作参考与工作文件，集中在这里。</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
             <div className="sync-status">
               <span className="sync-dot" />
@@ -963,6 +1020,27 @@ function Workspace({ user, onLogout }) {
                 </div>
               </div>
             </div>
+            {activeCharacter && (
+              <div className="character-category-tabs" aria-label="人物素材分类">
+                {["", ...CHARACTER_CATEGORIES].map((category) => {
+                  const count = assets.filter((item) => {
+                    const matchesCharacter = activeCharacter === "待归类人物" || activeCharacter === "未命名角色"
+                      ? !item.characterName
+                      : item.characterName === activeCharacter;
+                    return item.folder === "角色设定" && matchesCharacter && (!category ? true : item.characterCategory === category);
+                  }).length;
+                  return (
+                    <button
+                      key={category || "all"}
+                      className={activeCharacterCategory === category ? "active" : ""}
+                      onClick={() => setActiveCharacterCategory(category)}
+                    >
+                      {category || "全部"}<span>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {loadingAssets ? (
               <div className="empty-state"><div className="empty-icon"><Cloud size={22} /></div><h3>正在加载素材</h3><p>从云端同步你的素材与标签</p></div>
             ) : isRoleAlbumView ? (
@@ -974,6 +1052,7 @@ function Workspace({ user, onLogout }) {
                       key={album.name}
                       onClick={() => {
                         setActiveCharacter(album.name);
+                        setActiveCharacterCategory("");
                         setActiveFilter("全部");
                         setActiveTag("");
                       }}
@@ -984,7 +1063,7 @@ function Workspace({ user, onLogout }) {
                       </div>
                       <div className="role-album-info">
                         <strong>{album.name}</strong>
-                        <small>{album.imageCount ? `${album.imageCount} 张图片` : ""}{album.imageCount && album.videoCount ? " · " : ""}{album.videoCount ? `${album.videoCount} 个视频` : ""}</small>
+                        <small>{Object.entries(album.categoryCounts).map(([category, count], index) => `${index ? " · " : ""}${category} ${count}`).join("")}</small>
                       </div>
                     </button>
                   ))}
@@ -998,7 +1077,7 @@ function Workspace({ user, onLogout }) {
                   <AssetCard
                     key={asset.id}
                     asset={asset}
-                    onOpen={() => setSelected(asset)}
+                    onOpen={() => openAsset(asset)}
                     onFavorite={() =>
                       updateAsset(asset.id, { favorite: !asset.favorite })
                     }
@@ -1022,12 +1101,23 @@ function Workspace({ user, onLogout }) {
         <DetailDrawer
           asset={selected}
           allAssets={assets}
-          onClose={() => setSelected(null)}
+          onClose={() => {
+            setSelected(null);
+            setDetailTrail([]);
+          }}
           onFavorite={() =>
             updateAsset(selected.id, { favorite: !selected.favorite })
           }
           onUsed={() => updateAsset(selected.id, { used: !selected.used })}
           onEdit={() => setEditingAsset(selected)}
+          onDelete={() => deleteAsset(selected.id)}
+          onNavigate={openRelatedAsset}
+          onBack={detailTrail.length ? backToPreviousAsset : undefined}
+          onAssetUpdated={(updated) => {
+            setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+            setSelected(updated);
+            setDetailTrail((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+          }}
           onTagsUpdated={(tags) => {
             const updated = { ...selected, tags };
             setAssets((items) => items.map((item) => (item.id === selected.id ? updated : item)));
@@ -1042,6 +1132,7 @@ function Workspace({ user, onLogout }) {
           fileInput={fileInput}
           assets={assets}
           uploading={uploading}
+          defaultFolder={uploadDefaultFolder}
         />
       )}
       {editingAsset && (
@@ -1136,19 +1227,91 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
   );
 }
 
-function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTagsUpdated, onEdit }) {
+function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTagsUpdated, onEdit, onDelete, onNavigate, onBack, onAssetUpdated }) {
   const [editingTags, setEditingTags] = useState(false);
   const [tagsText, setTagsText] = useState(asset.tags.join(" "));
   const [savingTags, setSavingTags] = useState(false);
   const [tagError, setTagError] = useState("");
+  const [comments, setComments] = useState([]);
+  const [commentText, setCommentText] = useState("");
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentsSaving, setCommentsSaving] = useState(false);
+  const [commentError, setCommentError] = useState("");
+  const [editingCommentId, setEditingCommentId] = useState("");
+  const [editingCommentText, setEditingCommentText] = useState("");
+  const isCreation = asset.folder === "我的创作" || asset.folder === "成片";
   useEffect(() => {
     setTagsText(asset.tags.join(" "));
     setEditingTags(false);
     setTagError("");
   }, [asset.id, asset.tags]);
+  useEffect(() => {
+    if (!isCreation) {
+      setComments([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setCommentsLoading(true);
+    setCommentError("");
+    apiFetch(`/assets/${asset.id}/comments`)
+      .then((payload) => {
+        if (!cancelled) setComments(payload.comments || []);
+      })
+      .catch((error) => {
+        if (!cancelled) setCommentError(error.message);
+      })
+      .finally(() => {
+        if (!cancelled) setCommentsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [asset.id, isCreation]);
   const parentAssets = (asset.parentAssetIds || [])
     .map((id) => allAssets.find((item) => String(item.id) === String(id)))
     .filter(Boolean);
+  const derivedAssets = (asset.derivedAssetIds || [])
+    .map((id) => allAssets.find((item) => String(item.id) === String(id)))
+    .filter(Boolean);
+  const submitComment = async () => {
+    const content = commentText.trim();
+    if (!content || commentsSaving) return;
+    setCommentsSaving(true);
+    setCommentError("");
+    try {
+      const payload = await apiFetch(`/assets/${asset.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      setComments((items) => [payload.comment, ...items]);
+      setCommentText("");
+    } catch (error) {
+      setCommentError(error.message);
+    } finally {
+      setCommentsSaving(false);
+    }
+  };
+  const saveComment = async (commentId) => {
+    const content = editingCommentText.trim();
+    if (!content) return;
+    try {
+      const payload = await apiFetch(`/comments/${commentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content }),
+      });
+      setComments((items) => items.map((item) => item.id === commentId ? payload.comment : item));
+      setEditingCommentId("");
+      setEditingCommentText("");
+    } catch (error) {
+      setCommentError(error.message);
+    }
+  };
+  const deleteComment = async (commentId) => {
+    try {
+      await apiFetch(`/comments/${commentId}`, { method: "DELETE" });
+      setComments((items) => items.filter((item) => item.id !== commentId));
+    } catch (error) {
+      setCommentError(error.message);
+    }
+  };
   return (
     <div className="drawer-layer" onClick={onClose}>
       <aside
@@ -1156,7 +1319,14 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
         onClick={(event) => event.stopPropagation()}
       >
         <div className="drawer-top">
-          <span>素材详情</span>
+          <div className="drawer-heading">
+            {onBack && (
+              <button className="drawer-back-button" onClick={onBack} aria-label="返回上一级素材" title="返回上一级素材">
+                <ChevronDown size={16} />
+              </button>
+            )}
+            <span>{onBack ? "原素材详情" : "素材详情"}</span>
+          </div>
           <div>
             <button aria-label="分享">
               <Share2 size={17} />
@@ -1274,11 +1444,87 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
             </div>
             <p>{asset.note}</p>
           </div>
+          {isCreation && (
+            <div className="comments-section">
+              <div className="comments-heading">
+                <div className="note-label"><MessageSquare size={14} />创作反思</div>
+                <span>{comments.length}</span>
+              </div>
+              <div className="comment-composer">
+                <textarea
+                  value={commentText}
+                  onChange={(event) => setCommentText(event.target.value)}
+                  rows="3"
+                  placeholder="记录这次创作的反思、数据或下次要改进的地方"
+                />
+                <button className="comment-submit" onClick={submitComment} disabled={!commentText.trim() || commentsSaving}>
+                  <Plus size={14} />
+                  {commentsSaving ? "保存中" : "添加反思"}
+                </button>
+              </div>
+              {commentsLoading ? (
+                <div className="comments-muted">正在加载评论…</div>
+              ) : comments.length ? (
+                <div className="comments-list">
+                  {comments.map((comment) => (
+                    <div className="comment-item" key={comment.id}>
+                      {editingCommentId === comment.id ? (
+                        <>
+                          <textarea value={editingCommentText} onChange={(event) => setEditingCommentText(event.target.value)} rows="3" />
+                          <div className="comment-actions">
+                            <button onClick={() => saveComment(comment.id)}>保存</button>
+                            <button onClick={() => setEditingCommentId("")}>取消</button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <p>{comment.content}</p>
+                          <div className="comment-meta">
+                            <time>{new Date(comment.createdAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
+                            <div className="comment-actions">
+                              <button onClick={() => { setEditingCommentId(comment.id); setEditingCommentText(comment.content); }}>编辑</button>
+                              <button onClick={() => deleteComment(comment.id)}>删除</button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="comments-muted">还没有反思记录</div>
+              )}
+              {commentError && <div className="tag-error">{commentError}</div>}
+            </div>
+          )}
           {parentAssets.length > 0 && (
             <div className="detail-related">
               <div className="note-label"><Sparkles size={14} />关联参考素材</div>
               <div className="related-list">
-                {parentAssets.map((parent) => <span key={parent.id}>- {parent.name}</span>)}
+                {parentAssets.map((parent) => (
+                  <button
+                    className="related-item"
+                    key={parent.id}
+                    onClick={() => onNavigate?.(parent)}
+                    title="打开原素材"
+                  >
+                    <span>{parent.name}</span>
+                    <ChevronRight size={14} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {derivedAssets.length > 0 && (
+            <div className="detail-related">
+              <div className="note-label"><Play size={14} />关联创作作品</div>
+              <div className="related-list">
+                {derivedAssets.map((derived) => (
+                  <button className="related-item" key={derived.id} onClick={() => onNavigate?.(derived)} title="打开关联作品">
+                    <span>{derived.name}</span>
+                    <ChevronRight size={14} />
+                  </button>
+                ))}
               </div>
             </div>
           )}
@@ -1297,6 +1543,15 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
                 {asset.folder}
               </strong>
             </div>
+            {asset.folder === "角色设定" && (
+              <div>
+                <span>人物素材分类</span>
+                <strong>
+                  <FileImage size={14} />
+                  {asset.characterCategory || "未分类"}
+                </strong>
+              </div>
+            )}
             <div>
               <span>添加时间</span>
               <strong>{asset.date}</strong>
@@ -1331,13 +1586,26 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
               <Pencil size={16} />
               编辑素材
             </button>
-            <button className="secondary-button">
+            <a
+              className="secondary-button"
+              href={`${API_BASE}/assets/${asset.id}/download`}
+              download
+            >
               <Download size={16} />
               下载原文件
-            </button>
+            </a>
             <button className="primary-button">
               <Copy size={16} />
               复制链接
+            </button>
+            <button
+              className="danger-button"
+              onClick={() => {
+                if (window.confirm(`确定将“${asset.name}”移入回收站吗？`)) onDelete?.();
+              }}
+            >
+              <Trash2 size={16} />
+              移入回收站
             </button>
           </div>
         </div>
@@ -1351,6 +1619,7 @@ function EditAssetModal({ asset, onClose, onSave }) {
   const [source, setSource] = useState(asset.source || "");
   const [sourceUrl, setSourceUrl] = useState(asset.sourceUrl || "");
   const [characterName, setCharacterName] = useState(asset.characterName || "");
+  const [characterCategory, setCharacterCategory] = useState(asset.characterCategory || "");
   const [tagsText, setTagsText] = useState((asset.tags || []).join(" "));
   const [folder, setFolder] = useState(asset.folder || "灵感收集");
   const [note, setNote] = useState(asset.note || "");
@@ -1369,6 +1638,10 @@ function EditAssetModal({ asset, onClose, onSave }) {
       setError("角色设定必须填写人物名称");
       return;
     }
+    if (folder === "角色设定" && !characterCategory) {
+      setError("请选择人物素材分类");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -1377,6 +1650,7 @@ function EditAssetModal({ asset, onClose, onSave }) {
         source: source.trim() || "本地导入",
         sourceUrl: sourceUrl.trim(),
         characterName: characterName.trim(),
+        characterCategory,
         folder,
         note: note.trim(),
         used,
@@ -1414,7 +1688,7 @@ function EditAssetModal({ asset, onClose, onSave }) {
             所在文件夹
             <select value={folder} onChange={(event) => setFolder(event.target.value)}>
               <option>灵感收集</option>
-              <option>成片</option>
+              <option>我的创作</option>
               <option>角色设定</option>
               <option>项目资料</option>
             </select>
@@ -1423,6 +1697,14 @@ function EditAssetModal({ asset, onClose, onSave }) {
             人物名称
             <input value={characterName} onChange={(event) => setCharacterName(event.target.value)} placeholder="例如 林小栀" />
             <small>选择“角色设定”时必填，同名会聚合到同一人物相册</small>
+          </label>
+          <label>
+            人物素材分类
+            <select value={characterCategory} onChange={(event) => setCharacterCategory(event.target.value)}>
+              <option value="">请选择分类</option>
+              {CHARACTER_CATEGORIES.map((category) => <option key={category}>{category}</option>)}
+            </select>
+            <small>例如正脸、场景照、动作或服装</small>
           </label>
           <label className="edit-field-wide">
             原视频链接 / 参考链接
@@ -1455,15 +1737,16 @@ function EditAssetModal({ asset, onClose, onSave }) {
   );
 }
 
-function UploadModal({ onClose, onSubmit, fileInput, assets, uploading }) {
+function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultFolder }) {
   const [files, setFiles] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [source, setSource] = useState("本地导入");
   const [sourceUrl, setSourceUrl] = useState("");
   const [characterName, setCharacterName] = useState("");
+  const [characterCategory, setCharacterCategory] = useState("");
   const [tagsText, setTagsText] = useState("");
   const [used, setUsed] = useState(false);
-  const [folder, setFolder] = useState("灵感收集");
+  const [folder, setFolder] = useState(defaultFolder || "灵感收集");
   const [parentAssetIds, setParentAssetIds] = useState([]);
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [formError, setFormError] = useState("");
@@ -1482,6 +1765,10 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading }) {
       setFormError("角色设定必须填写人物名称");
       return;
     }
+    if (folder === "角色设定" && !characterCategory) {
+      setFormError("请选择人物素材分类");
+      return;
+    }
     setFormError("");
     const tags = tagsText
       .split(/[,，\s]+/)
@@ -1491,6 +1778,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading }) {
           source: source.trim() || "本地导入",
           sourceUrl: sourceUrl.trim(),
           characterName: characterName.trim(),
+          characterCategory,
       tags: tags.length ? tags : ["待整理"],
       used,
       folder,
@@ -1592,18 +1880,28 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading }) {
             <small>多个标签用空格或逗号分隔</small>
           </label>
           {folder === "角色设定" && (
-            <label>
-              人物名称
-              <input
-                value={characterName}
-                onChange={(event) => {
-                  setCharacterName(event.target.value);
-                  setFormError("");
-                }}
-                placeholder="例如 林小栀"
-              />
-              <small>同名素材会聚合到同一人物相册</small>
-            </label>
+            <div className="character-upload-fields">
+              <label>
+                人物名称
+                <input
+                  value={characterName}
+                  onChange={(event) => {
+                    setCharacterName(event.target.value);
+                    setFormError("");
+                  }}
+                  placeholder="例如 林小栀"
+                />
+                <small>同名素材会聚合到同一人物相册</small>
+              </label>
+              <label>
+                人物素材分类
+                <select value={characterCategory} onChange={(event) => { setCharacterCategory(event.target.value); setFormError(""); }}>
+                  <option value="">请选择分类</option>
+                  {CHARACTER_CATEGORIES.map((category) => <option key={category}>{category}</option>)}
+                </select>
+                <small>例如正脸、场景照、动作或服装</small>
+              </label>
+            </div>
           )}
           <label>
             关联参考素材
@@ -1656,7 +1954,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading }) {
                 onChange={(event) => setFolder(event.target.value)}
               >
                 <option>灵感收集</option>
-                <option>成片</option>
+                <option>我的创作</option>
                 <option>角色设定</option>
                 <option>项目资料</option>
               </select>

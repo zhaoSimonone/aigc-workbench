@@ -978,6 +978,22 @@ button {
   display: flex;
   gap: 6px;
 }
+.drawer-heading {
+  align-items: center;
+  gap: 8px !important;
+}
+.drawer-back-button {
+  width: 26px !important;
+  height: 26px !important;
+  border: 1px solid #e0e1dc;
+  background: #fff !important;
+  transform: rotate(90deg);
+}
+.drawer-back-button:hover {
+  color: #bd6655 !important;
+  border-color: #e9c9c0;
+  background: #fff4f0 !important;
+}
 .drawer-top button,
 .modal-head button {
   display: grid;
@@ -1182,9 +1198,21 @@ button {
   gap: 8px;
   flex-wrap: wrap;
 }
-.drawer-actions button {
+.drawer-actions button,
+.drawer-actions > .secondary-button {
   flex: 1;
   min-width: 120px;
+}
+.drawer-actions .danger-button {
+  flex-basis: 100%;
+  color: #b94f40;
+  background: #fff5f2;
+  border: 1px solid #f0cfc8;
+}
+.drawer-actions .danger-button:hover {
+  color: #a33e31;
+  background: #ffe9e4;
+  border-color: #eab2a7;
 }
 .modal-layer {
   align-items: center;
@@ -1934,6 +1962,175 @@ button {
   color: #545b60;
   font-size: 12px;
 }
+.related-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  color: #545b60;
+  text-align: left;
+  background: #f4f5f1;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11px;
+  transition: border-color 0.18s, background 0.18s, color 0.18s;
+}
+.related-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.related-item svg {
+  flex: 0 0 auto;
+  color: #9ca39f;
+}
+.related-item:hover {
+  color: #a65343;
+  background: #fff1ed;
+  border-color: #efcfc7;
+}
+.related-item:hover svg {
+  color: #d76e59;
+}
+.character-category-tabs {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 17px 0 0;
+}
+.character-category-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  color: #8e9692;
+  background: #f0f1ed;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 10px;
+}
+.character-category-tabs button span {
+  color: #aeb4b1;
+  font: 9px "DM Mono", monospace;
+}
+.character-category-tabs button.active {
+  color: #a65343;
+  background: #fff1ed;
+  border-color: #efcfc7;
+}
+.character-category-tabs button.active span {
+  color: #c77765;
+}
+.character-upload-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 11px;
+}
+.comments-section {
+  padding: 18px 0 2px;
+  border-bottom: 1px solid #e7e8e3;
+}
+.comments-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.comments-heading > span {
+  color: #a2a9a5;
+  font: 10px "DM Mono", monospace;
+}
+.comment-composer {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.comment-composer textarea,
+.comment-item textarea {
+  width: 100%;
+  min-height: 70px;
+  padding: 9px 10px;
+  resize: vertical;
+  outline: 0;
+  color: #4e5653;
+  background: #fff;
+  border: 1px solid #dedfda;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.comment-composer textarea:focus,
+.comment-item textarea:focus {
+  border-color: #eb765f;
+  box-shadow: 0 0 0 3px rgba(235, 118, 95, 0.1);
+}
+.comment-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  gap: 4px;
+  padding: 7px 10px;
+  color: #fff;
+  background: #eb654d;
+  border-radius: 5px;
+  font-size: 10px;
+}
+.comment-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.comments-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+}
+.comment-item {
+  padding: 10px;
+  background: #f5f6f2;
+  border: 1px solid #e7e8e3;
+  border-radius: 5px;
+}
+.comment-item p {
+  margin: 0;
+  color: #626b67;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.comment-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.comment-meta time,
+.comments-muted {
+  color: #a2a9a5;
+  font-size: 9px;
+}
+.comment-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+.comment-actions button {
+  padding: 0;
+  color: #b06a5c;
+  background: transparent;
+  font-size: 9px;
+}
+.comment-actions button:hover {
+  color: #8f4033;
+}
+.comments-muted {
+  padding: 12px 0 4px;
+}
 .auth-form input,
 .metadata-form input,
 .metadata-form select {
@@ -2225,6 +2422,10 @@ button {
   .upload-modal-expanded {
     max-height: calc(100vh - 24px);
     padding: 19px;
+  }
+  .character-upload-fields {
+    grid-template-columns: 1fr;
+    gap: 15px;
   }
   .modal-subtitle {
     font-size: 10px;

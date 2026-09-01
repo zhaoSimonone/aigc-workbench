@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS assets (
   source TEXT NOT NULL DEFAULT '本地导入',
   source_url TEXT NOT NULL DEFAULT '',
   character_name TEXT NOT NULL DEFAULT '',
+  character_category TEXT NOT NULL DEFAULT '',
   object_key TEXT NOT NULL,
   thumb_key TEXT,
   content_type TEXT NOT NULL,
@@ -47,6 +48,8 @@ CREATE TABLE IF NOT EXISTS assets (
   deleted_at TIMESTAMPTZ
 );
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_category TEXT NOT NULL DEFAULT '';
+UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
 
@@ -72,3 +75,14 @@ CREATE TABLE IF NOT EXISTS asset_relations (
   CHECK (source_asset_id <> derived_asset_id)
 );
 CREATE INDEX IF NOT EXISTS asset_relations_derived_idx ON asset_relations(derived_asset_id);
+
+CREATE TABLE IF NOT EXISTS asset_comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 5000),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS asset_comments_asset_idx ON asset_comments(asset_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS asset_comments_user_idx ON asset_comments(user_id);
