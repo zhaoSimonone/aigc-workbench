@@ -411,6 +411,7 @@ function AuthScreen({ onAuth }) {
 
 function Workspace({ user, onLogout }) {
   const [assets, setAssets] = useState([]);
+  const [characterAlbums, setCharacterAlbums] = useState([]);
   const [loadingAssets, setLoadingAssets] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -424,6 +425,7 @@ function Workspace({ user, onLogout }) {
   const [selected, setSelected] = useState(null);
   const [detailTrail, setDetailTrail] = useState([]);
   const [showUpload, setShowUpload] = useState(false);
+  const [showAlbumCreator, setShowAlbumCreator] = useState(false);
   const [editingAsset, setEditingAsset] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -433,8 +435,11 @@ function Workspace({ user, onLogout }) {
   const folderInput = useRef(null);
 
   useEffect(() => {
-    apiFetch("/assets")
-      .then((payload) => setAssets((payload.assets || []).map(normaliseAsset)))
+    Promise.all([apiFetch("/assets"), apiFetch("/character-albums")])
+      .then(([assetPayload, albumPayload]) => {
+        setAssets((assetPayload.assets || []).map(normaliseAsset));
+        setCharacterAlbums(albumPayload.albums || []);
+      })
       .catch((error) => setLoadError(error.message))
       .finally(() => setLoadingAssets(false));
   }, []);
@@ -506,6 +511,7 @@ function Workspace({ user, onLogout }) {
   const roleAlbums = useMemo(() => {
     if (activeFolder !== "角色设定" || activeCharacter) return [];
     const groups = new Map();
+    characterAlbums.forEach((album) => groups.set(album.name, { name: album.name, assets: [] }));
     filteredAssets.forEach((asset) => {
       const name = asset.characterName || "待归类人物";
       const existing = groups.get(name) || { name, assets: [] };
@@ -526,7 +532,7 @@ function Workspace({ user, onLogout }) {
         }, {}),
       }))
       .sort((a, b) => a.name.localeCompare(b.name, "zh"));
-  }, [filteredAssets, activeFolder, activeCharacter]);
+  }, [filteredAssets, characterAlbums, activeFolder, activeCharacter]);
   const updateAsset = async (id, patch) => {
     try {
       const payload = await apiFetch(`/assets/${id}`, {
@@ -563,6 +569,9 @@ function Workspace({ user, onLogout }) {
       for (const file of files) {
         const form = new FormData();
         form.append("file", file);
+        const requestedName = String(metadata.name || "").trim();
+        const fileStem = file.name.replace(/\.[^/.]+$/, "");
+        if (requestedName) form.append("name", files.length === 1 ? requestedName : `${requestedName} · ${fileStem}`);
         form.append("source", metadata.source || "本地导入");
         form.append("sourceUrl", metadata.sourceUrl || "");
         form.append("characterName", metadata.characterName || "");
@@ -575,12 +584,31 @@ function Workspace({ user, onLogout }) {
         uploaded.push(normaliseAsset(payload.asset));
       }
       setAssets((items) => [...uploaded, ...items]);
+      if (metadata.characterName) {
+        setCharacterAlbums((albums) => albums.some((album) => album.name === metadata.characterName)
+          ? albums
+          : [...albums, { id: `local-${metadata.characterName}`, name: metadata.characterName, assetCount: 0 }]);
+      }
       setShowUpload(false);
     } catch (error) {
       setLoadError(error.message);
     } finally {
       setUploading(false);
     }
+  };
+  const createCharacterAlbum = async (name) => {
+    const payload = await apiFetch("/character-albums", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    setCharacterAlbums((albums) => [...albums, payload.album]);
+    setActiveFolder("角色设定");
+    setActiveCharacter(payload.album.name);
+    setActiveCharacterCategory("");
+    setActiveFilter("全部");
+    setActiveTag("");
+    setQuery("");
+    return payload.album;
   };
   const saveAssetEdit = async (id, fields) => {
     const { tags, ...assetFields } = fields;
@@ -908,6 +936,12 @@ function Workspace({ user, onLogout }) {
                 )}
                 <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
+              {isRoleAlbumView && (
+                <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
+                  <Plus size={15} />
+                  新建人物相册
+                </button>
+              )}
             <div className="sync-status">
               <span className="sync-dot" />
                 已同步 <b>腾讯云 COS · 数据库</b>
@@ -1085,6 +1119,13 @@ function Workspace({ user, onLogout }) {
                   />
                 ))}
               </div>
+            ) : activeCharacter ? (
+              <div className="empty-state">
+                <div className="empty-icon"><FileImage size={22} /></div>
+                <h3>这个人物相册还没有素材</h3>
+                <p>上传第一张正脸或场景照，开始整理这个人物。</p>
+                <button className="primary-button" onClick={() => setShowUpload(true)}><Upload size={16} />上传人物素材</button>
+              </div>
             ) : (
               <EmptyState
                 query={query}
@@ -1133,6 +1174,14 @@ function Workspace({ user, onLogout }) {
           assets={assets}
           uploading={uploading}
           defaultFolder={uploadDefaultFolder}
+          defaultCharacterName={activeFolder === "角色设定" ? activeCharacter : ""}
+          characterAlbums={characterAlbums}
+        />
+      )}
+      {showAlbumCreator && (
+        <CreateCharacterAlbumModal
+          onClose={() => setShowAlbumCreator(false)}
+          onCreate={createCharacterAlbum}
         />
       )}
       {editingAsset && (
@@ -1737,12 +1786,14 @@ function EditAssetModal({ asset, onClose, onSave }) {
   );
 }
 
-function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultFolder }) {
+function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultFolder, defaultCharacterName, characterAlbums }) {
   const [files, setFiles] = useState([]);
   const [dragging, setDragging] = useState(false);
+  const [name, setName] = useState("");
   const [source, setSource] = useState("本地导入");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [characterName, setCharacterName] = useState("");
+  const [characterName, setCharacterName] = useState(defaultCharacterName || "");
+  const [albumChoice, setAlbumChoice] = useState(defaultCharacterName || "");
   const [characterCategory, setCharacterCategory] = useState("");
   const [tagsText, setTagsText] = useState("");
   const [used, setUsed] = useState(false);
@@ -1750,6 +1801,12 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
   const [parentAssetIds, setParentAssetIds] = useState([]);
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [formError, setFormError] = useState("");
+  useEffect(() => {
+    if (defaultCharacterName) {
+      setCharacterName(defaultCharacterName);
+      setAlbumChoice(defaultCharacterName);
+    }
+  }, [defaultCharacterName]);
   const referenceAssets = assets.filter((asset) => asset.type === "video" || asset.type === "image");
   const selectedReferenceAssets = referenceAssets.filter((asset) => parentAssetIds.includes(String(asset.id)));
   const referenceLabel = selectedReferenceAssets.length === 0
@@ -1775,6 +1832,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
       .map((tag) => tag.trim())
       .filter(Boolean);
     onSubmit(files, {
+          name: name.trim(),
           source: source.trim() || "本地导入",
           sourceUrl: sourceUrl.trim(),
           characterName: characterName.trim(),
@@ -1853,6 +1911,15 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
         />
         <div className="metadata-form">
           <label>
+            素材名称
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder={files.length > 1 ? "例如 林小栀角色参考（会自动加文件名）" : "例如 便利店转场参考"}
+            />
+            <small>{files.length > 1 ? "多文件上传时会以此作为名称前缀，并保留原文件名" : "不填写则使用原文件名"}</small>
+          </label>
+          <label>
             素材来源
             <input
               value={source}
@@ -1882,16 +1949,31 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
           {folder === "角色设定" && (
             <div className="character-upload-fields">
               <label>
-                人物名称
-                <input
-                  value={characterName}
+                人物相册
+                <select
+                  value={albumChoice}
                   onChange={(event) => {
-                    setCharacterName(event.target.value);
+                    const value = event.target.value;
+                    setAlbumChoice(value);
+                    setCharacterName(value === "__new__" ? "" : value);
                     setFormError("");
                   }}
-                  placeholder="例如 林小栀"
-                />
-                <small>同名素材会聚合到同一人物相册</small>
+                >
+                  <option value="">请选择人物相册</option>
+                  {characterAlbums.map((album) => <option value={album.name} key={album.id}>{album.name}</option>)}
+                  <option value="__new__">+ 新建人物相册</option>
+                </select>
+                {(albumChoice === "__new__" || !characterAlbums.length) && (
+                  <input
+                    value={characterName}
+                    onChange={(event) => {
+                      setCharacterName(event.target.value);
+                      setFormError("");
+                    }}
+                    placeholder="输入新人物名称，例如 林小栀"
+                  />
+                )}
+                <small>先创建人物相册，再在相册中持续上传正脸、场景照等素材</small>
               </label>
               <label>
                 人物素材分类
@@ -2000,6 +2082,56 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
     </div>
   );
 }
+
+function CreateCharacterAlbumModal({ onClose, onCreate }) {
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    const value = name.trim();
+    if (!value) {
+      setError("请输入人物相册名称");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onCreate(value);
+      onClose();
+    } catch (createError) {
+      setError(createError.message || "创建失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal-layer edit-layer" onClick={onClose}>
+      <form className="edit-modal album-create-modal" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">NEW CHARACTER ALBUM</p>
+            <h2>新建人物相册</h2>
+            <p className="modal-subtitle">创建后进入相册，再上传这个人物的正脸、场景照和动作素材。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+        </div>
+        <div className="edit-form-grid album-create-form">
+          <label className="edit-field-wide">
+            相册名称
+            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 林小栀" />
+          </label>
+        </div>
+        {error && <div className="auth-error edit-error">{error}</div>}
+        <div className="modal-foot">
+          <button type="button" className="text-button" onClick={onClose}>取消</button>
+          <button type="submit" className="primary-button" disabled={saving}><Plus size={16} />{saving ? "创建中…" : "创建并进入"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function EmptyState({ query, onReset }) {
   return (
     <div className="empty-state">

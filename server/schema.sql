@@ -53,6 +53,20 @@ UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
 
+CREATE TABLE IF NOT EXISTS character_albums (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, name)
+);
+INSERT INTO character_albums(user_id, name)
+SELECT DISTINCT user_id, character_name
+FROM assets
+WHERE character_name <> ''
+ON CONFLICT(user_id, name) DO NOTHING;
+CREATE INDEX IF NOT EXISTS character_albums_user_idx ON character_albums(user_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS tags (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

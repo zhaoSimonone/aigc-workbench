@@ -702,6 +702,16 @@ button {
   color: #929a96;
   font-size: 10px;
 }
+.album-create-button {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+.album-create-modal {
+  width: min(520px, 100%);
+}
+.album-create-form {
+  margin-top: 20px;
+}
 .album-back-button {
   display: inline-flex;
   align-items: center;

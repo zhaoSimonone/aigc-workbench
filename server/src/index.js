@@ -258,6 +258,38 @@ app.post('/api/auth/logout', async (req, res, next) => {
   }
 });
 
+app.get('/api/character-albums', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ca.id, ca.name, ca.created_at, COUNT(a.id)::int AS asset_count
+         FROM character_albums ca
+         LEFT JOIN assets a ON a.user_id=ca.user_id AND a.character_name=ca.name AND a.folder='角色设定' AND a.deleted_at IS NULL
+        WHERE ca.user_id=$1
+        GROUP BY ca.id
+        ORDER BY ca.created_at ASC, ca.name ASC`,
+      [req.user.id],
+    );
+    res.json({ albums: rows.map((row) => ({ id: row.id, name: row.name, assetCount: row.asset_count, createdAt: row.created_at })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/character-albums', requireUser, async (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: '人物相册名称不能为空' });
+    const { rows } = await pool.query(
+      'INSERT INTO character_albums(user_id,name) VALUES($1,$2) RETURNING id,name,created_at',
+      [req.user.id, name],
+    );
+    res.status(201).json({ album: { id: rows[0].id, name: rows[0].name, assetCount: 0, createdAt: rows[0].created_at } });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: '这个人物相册已经存在' });
+    next(error);
+  }
+});
+
 app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
@@ -374,6 +406,12 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      if (folder === '角色设定' && characterName) {
+        await client.query(
+          'INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING',
+          [req.user.id, characterName],
+        );
+      }
       const { rows } = await client.query(
         `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
