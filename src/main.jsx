@@ -40,6 +40,7 @@ import {
   Trash2,
   Upload,
   UserPlus,
+  Users,
   Video,
   X,
   Info,
@@ -50,6 +51,7 @@ const media = "/media/";
 const API_BASE = "/api";
 const LIBRARY_FOLDERS = ["灵感收集", "我的创作", "角色设定", "项目资料"];
 const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
+const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
 
 const seedAssets = [
   {
@@ -412,7 +414,9 @@ function AuthScreen({ onAuth }) {
 function Workspace({ user, onLogout }) {
   const [assets, setAssets] = useState([]);
   const [characterAlbums, setCharacterAlbums] = useState([]);
+  const [videoAccounts, setVideoAccounts] = useState([]);
   const [loadingAssets, setLoadingAssets] = useState(true);
+  const [loadingVideoAccounts, setLoadingVideoAccounts] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [activeFolder, setActiveFolder] = useState("全部素材");
@@ -426,6 +430,8 @@ function Workspace({ user, onLogout }) {
   const [detailTrail, setDetailTrail] = useState([]);
   const [showUpload, setShowUpload] = useState(false);
   const [showAlbumCreator, setShowAlbumCreator] = useState(false);
+  const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
+  const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [editingAsset, setEditingAsset] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -435,13 +441,17 @@ function Workspace({ user, onLogout }) {
   const folderInput = useRef(null);
 
   useEffect(() => {
-    Promise.all([apiFetch("/assets"), apiFetch("/character-albums")])
-      .then(([assetPayload, albumPayload]) => {
+    Promise.all([apiFetch("/assets"), apiFetch("/character-albums"), apiFetch("/video-accounts")])
+      .then(([assetPayload, albumPayload, accountPayload]) => {
         setAssets((assetPayload.assets || []).map(normaliseAsset));
         setCharacterAlbums(albumPayload.albums || []);
+        setVideoAccounts(accountPayload.accounts || []);
       })
       .catch((error) => setLoadError(error.message))
-      .finally(() => setLoadingAssets(false));
+      .finally(() => {
+        setLoadingAssets(false);
+        setLoadingVideoAccounts(false);
+      });
   }, []);
   const folderItems = useMemo(
     () => [
@@ -466,8 +476,9 @@ function Workspace({ user, onLogout }) {
         count: assets.filter((item) => item.folder === "项目资料").length,
         icon: Archive,
       },
+      { label: "视频账号", count: videoAccounts.length, icon: Users },
     ],
-    [assets],
+    [assets, videoAccounts],
   );
   const filteredAssets = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -659,6 +670,28 @@ function Workspace({ user, onLogout }) {
       setLoadError(error.message);
     }
   };
+  const saveVideoAccount = async (fields, accountId) => {
+    const payload = await apiFetch(accountId ? `/video-accounts/${accountId}` : "/video-accounts", {
+      method: accountId ? "PATCH" : "POST",
+      body: JSON.stringify(fields),
+    });
+    if (accountId) {
+      setVideoAccounts((items) => items.map((item) => (item.id === accountId ? payload.account : item)));
+    } else {
+      setVideoAccounts((items) => [payload.account, ...items]);
+    }
+    setShowVideoAccountModal(false);
+    setEditingVideoAccount(null);
+  };
+  const deleteVideoAccount = async (account) => {
+    if (!window.confirm(`确定取消收藏“${account.accountName || account.profileUrl}”吗？`)) return;
+    try {
+      await apiFetch(`/video-accounts/${account.id}`, { method: "DELETE" });
+      setVideoAccounts((items) => items.filter((item) => item.id !== account.id));
+    } catch (error) {
+      setLoadError(error.message);
+    }
+  };
   const total = assets.length;
   const videoCount = assets.filter((item) => item.type === "video").length;
   const imageCount = assets.filter((item) => item.type === "image").length;
@@ -695,6 +728,7 @@ function Workspace({ user, onLogout }) {
   ];
   const libraryTitle = activeCharacter ? `角色设定 / ${activeCharacter}` : activeFolder;
   const isRoleAlbumView = activeFolder === "角色设定" && !activeCharacter;
+  const isVideoAccountView = activeFolder === "视频账号";
   const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
     ? activeFolder
     : "灵感收集";
@@ -882,20 +916,29 @@ function Workspace({ user, onLogout }) {
               <p className="intro-copy">把灵感收好，下一条作品会更快开始。</p>
             </div>
             <div className="intro-actions">
-              <button
-                className="secondary-button"
-                onClick={() => folderInput.current?.click()}
-              >
-                <FolderOpen size={16} />
-                导入文件夹
-              </button>
-              <button
-                className="primary-button"
-                onClick={() => setShowUpload(true)}
-              >
-                <Plus size={18} />
-                新增素材
-              </button>
+              {isVideoAccountView ? (
+                <button className="primary-button" onClick={() => setShowVideoAccountModal(true)}>
+                  <Plus size={18} />
+                  收藏视频账号
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="secondary-button"
+                    onClick={() => folderInput.current?.click()}
+                  >
+                    <FolderOpen size={16} />
+                    导入文件夹
+                  </button>
+                  <button
+                    className="primary-button"
+                    onClick={() => setShowUpload(true)}
+                  >
+                    <Plus size={18} />
+                    新增素材
+                  </button>
+                </>
+              )}
               <input
                 ref={folderInput}
                 type="file"
@@ -936,12 +979,14 @@ function Workspace({ user, onLogout }) {
                 <h2>
                   {libraryTitle}{" "}
                   <span>
-                    {isRoleAlbumView
+                    {isVideoAccountView
+                      ? `${videoAccounts.length} 个账号`
+                      : isRoleAlbumView
                       ? `${roleAlbums.length} 个角色`
                       : filteredAssets.length !== assets.length
                       ? `${filteredAssets.length} / `
                       : ""}
-                    {!isRoleAlbumView && total}
+                    {!isRoleAlbumView && !isVideoAccountView && total}
                   </span>
                 </h2>
                 {activeCharacter && (
@@ -949,7 +994,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -963,6 +1008,16 @@ function Workspace({ user, onLogout }) {
             </div>
           </div>
           {loadError && <div className="inline-error">{loadError}</div>}
+          {isVideoAccountView ? (
+            <VideoAccountsPanel
+              accounts={videoAccounts}
+              loading={loadingVideoAccounts}
+              onCreate={() => setShowVideoAccountModal(true)}
+              onEdit={(account) => setEditingVideoAccount(account)}
+              onDelete={deleteVideoAccount}
+            />
+          ) : (
+            <>
             <div className="toolbar">
               <div className="filter-tabs">
                 {["全部", "视频", "图片", "已收藏", "已使用"].map((filter) => (
@@ -1150,6 +1205,8 @@ function Workspace({ user, onLogout }) {
                 }}
               />
             )}
+            </>
+          )}
           </section>
         </div>
       </main>
@@ -1199,6 +1256,17 @@ function Workspace({ user, onLogout }) {
           onCreate={createCharacterAlbum}
         />
       )}
+      {(showVideoAccountModal || editingVideoAccount) && (
+        <VideoAccountModal
+          key={editingVideoAccount?.id || "new"}
+          account={editingVideoAccount}
+          onClose={() => {
+            setShowVideoAccountModal(false);
+            setEditingVideoAccount(null);
+          }}
+          onSave={(fields) => saveVideoAccount(fields, editingVideoAccount?.id)}
+        />
+      )}
       {editingAsset && (
         <EditAssetModal
           asset={editingAsset}
@@ -1209,6 +1277,139 @@ function Workspace({ user, onLogout }) {
       )}
     </div>
   );
+}
+
+function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
+  if (loading) {
+    return (
+      <div className="empty-state">
+        <div className="empty-icon"><Cloud size={22} /></div>
+        <h3>正在加载视频账号</h3>
+        <p>从云端同步你收藏的创作者</p>
+      </div>
+    );
+  }
+  if (!accounts.length) {
+    return (
+      <div className="video-account-empty">
+        <div className="empty-icon"><Users size={22} /></div>
+        <h3>还没有收藏视频账号</h3>
+        <p>把值得持续关注的抖音、TikTok 或 Instagram 账号集中保存。</p>
+        <button className="primary-button" onClick={onCreate}><Plus size={16} />收藏第一个账号</button>
+      </div>
+    );
+  }
+  return (
+    <div className="video-account-grid">
+      {accounts.map((account) => (
+        <article className="video-account-card" key={account.id}>
+          <div className="video-account-card-head">
+            <span className="video-account-platform"><Users size={14} />{account.platform}</span>
+            <div className="video-account-actions">
+              <button onClick={() => onEdit(account)} aria-label={`编辑${account.accountName || account.platform}`} title="编辑">
+                <Pencil size={15} />
+              </button>
+              <button className="video-account-delete" onClick={() => onDelete(account)} aria-label={`取消收藏${account.accountName || account.platform}`} title="取消收藏">
+                <Trash2 size={15} />
+              </button>
+            </div>
+          </div>
+          <h3>{account.accountName || "未命名账号"}</h3>
+          <a className="video-account-link" href={account.profileUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} />
+            <span>{account.profileUrl}</span>
+          </a>
+          {account.note ? <p className="video-account-note">{account.note}</p> : <p className="video-account-note muted">暂无备注</p>}
+          <div className="video-account-meta">
+            <span>收藏于 {formatAccountDate(account.createdAt)}</span>
+            <a href={account.profileUrl} target="_blank" rel="noreferrer">打开主页 <ArrowUpRight size={13} /></a>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function VideoAccountModal({ account, onClose, onSave }) {
+  const [platform, setPlatform] = useState(account?.platform || VIDEO_ACCOUNT_PLATFORMS[0]);
+  const [accountName, setAccountName] = useState(account?.accountName || "");
+  const [profileUrl, setProfileUrl] = useState(account?.profileUrl || "");
+  const [note, setNote] = useState(account?.note || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    const url = profileUrl.trim();
+    if (!url) {
+      setError("请输入关注链接");
+      return;
+    }
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+    } catch (_) {
+      setError("请输入有效的 HTTP(S) 关注链接");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({ platform, accountName: accountName.trim(), profileUrl: url, note: note.trim() });
+    } catch (saveError) {
+      setError(saveError.message || "保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal-layer edit-layer" onClick={onClose}>
+      <form className="edit-modal video-account-modal" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">{account ? "EDIT VIDEO ACCOUNT" : "NEW VIDEO ACCOUNT"}</p>
+            <h2>{account ? "编辑视频账号" : "收藏视频账号"}</h2>
+            <p className="modal-subtitle">保存账号主页链接，之后可以从这里快速回到原平台。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+        </div>
+        <div className="edit-form-grid video-account-form">
+          <label>
+            平台
+            <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
+              {VIDEO_ACCOUNT_PLATFORMS.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
+          <label>
+            账号名称 <small>可选</small>
+            <input value={accountName} onChange={(event) => setAccountName(event.target.value)} placeholder="例如 摄影师 Alex" />
+          </label>
+          <label className="edit-field-wide">
+            关注链接
+            <input type="url" required value={profileUrl} onChange={(event) => setProfileUrl(event.target.value)} placeholder="https://www.douyin.com/user/..." />
+            <small>填写账号主页地址，而不是单条视频地址</small>
+          </label>
+          <label className="edit-field-wide">
+            备注 <small>可选</small>
+            <textarea value={note} onChange={(event) => setNote(event.target.value)} rows="4" placeholder="记录账号的内容方向、值得关注的原因等" />
+          </label>
+        </div>
+        {error && <div className="auth-error edit-error">{error}</div>}
+        <div className="modal-foot">
+          <button type="button" className="text-button" onClick={onClose}>取消</button>
+          <button type="submit" className="primary-button" disabled={saving}>
+            <Check size={16} />
+            {saving ? "保存中…" : account ? "保存修改" : "收藏账号"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function formatAccountDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "刚刚";
+  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "numeric", day: "numeric" });
 }
 
 function AssetCard({ asset, onOpen, onFavorite, list }) {

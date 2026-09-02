@@ -392,6 +392,113 @@ app.post('/api/character-albums', requireUser, async (req, res, next) => {
   }
 });
 
+function publicVideoAccount(row) {
+  return {
+    id: row.id,
+    platform: row.platform,
+    accountName: row.account_name,
+    profileUrl: row.profile_url,
+    note: row.note,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function validateProfileUrl(value) {
+  const url = String(value || '').trim();
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (_) {
+    throw new Error('请输入有效的账号关注链接');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('账号链接必须是 HTTP(S) 地址');
+  return url.slice(0, 2000);
+}
+
+app.get('/api/video-accounts', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, platform, account_name, profile_url, note, created_at, updated_at
+         FROM video_accounts
+        WHERE user_id=$1
+        ORDER BY created_at DESC`,
+      [req.user.id],
+    );
+    res.json({ accounts: rows.map(publicVideoAccount) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/video-accounts', requireUser, async (req, res, next) => {
+  try {
+    const platform = String(req.body.platform || '其他').trim().slice(0, 40) || '其他';
+    const accountName = String(req.body.accountName || '').trim().slice(0, 120);
+    const profileUrl = validateProfileUrl(req.body.profileUrl);
+    const note = String(req.body.note || '').trim().slice(0, 2000);
+    const { rows } = await pool.query(
+      `INSERT INTO video_accounts(user_id, platform, account_name, profile_url, note)
+       VALUES($1,$2,$3,$4,$5)
+       RETURNING id, platform, account_name, profile_url, note, created_at, updated_at`,
+      [req.user.id, platform, accountName, profileUrl, note],
+    );
+    res.status(201).json({ account: publicVideoAccount(rows[0]) });
+  } catch (error) {
+    if (error.message === '请输入有效的账号关注链接' || error.message === '账号链接必须是 HTTP(S) 地址') return res.status(400).json({ error: error.message });
+    if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
+    next(error);
+  }
+});
+
+app.patch('/api/video-accounts/:id', requireUser, async (req, res, next) => {
+  try {
+    const fields = [];
+    const values = [];
+    if (Object.prototype.hasOwnProperty.call(req.body, 'platform')) {
+      values.push(String(req.body.platform || '其他').trim().slice(0, 40) || '其他');
+      fields.push(`platform=$${values.length}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'accountName')) {
+      values.push(String(req.body.accountName || '').trim().slice(0, 120));
+      fields.push(`account_name=$${values.length}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'profileUrl')) {
+      values.push(validateProfileUrl(req.body.profileUrl));
+      fields.push(`profile_url=$${values.length}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'note')) {
+      values.push(String(req.body.note || '').trim().slice(0, 2000));
+      fields.push(`note=$${values.length}`);
+    }
+    if (!fields.length) return res.status(400).json({ error: '没有可更新字段' });
+    fields.push('updated_at=now()');
+    values.push(req.params.id, req.user.id);
+    const { rows } = await pool.query(
+      `UPDATE video_accounts SET ${fields.join(', ')}
+        WHERE id=$${values.length - 1} AND user_id=$${values.length}
+        RETURNING id, platform, account_name, profile_url, note, created_at, updated_at`,
+      values,
+    );
+    if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
+    res.json({ account: publicVideoAccount(rows[0]) });
+  } catch (error) {
+    if (error.message === '请输入有效的账号关注链接' || error.message === '账号链接必须是 HTTP(S) 地址') return res.status(400).json({ error: error.message });
+    if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
+    next(error);
+  }
+});
+
+app.delete('/api/video-accounts/:id', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query('DELETE FROM video_accounts WHERE id=$1 AND user_id=$2 RETURNING id', [req.params.id, req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
