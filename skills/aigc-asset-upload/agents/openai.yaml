@@ -1,0 +1,4 @@
+interface:
+  display_name: "AIGC 素材上传"
+  short_description: "上传图片视频到 AIGC 素材库"
+  default_prompt: "使用 $aigc-asset-upload 将我指定的视频或图片上传到 AIGC 素材库。"
