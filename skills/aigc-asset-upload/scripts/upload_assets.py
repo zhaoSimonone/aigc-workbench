@@ -3,6 +3,7 @@
 
 import argparse
 import getpass
+import hashlib
 import http.client
 import json
 import mimetypes
@@ -136,6 +137,29 @@ class Client:
             raise RuntimeError((payload or {}).get("error", "AIGC Shelf 登录失败"))
         return payload.get("user", {})
 
+    def find_existing(self, hashes):
+        """Return existing assets keyed by content hash for the signed-in user."""
+        hashes = list(dict.fromkeys(hashes))
+        if not hashes:
+            return {}
+        existing = {}
+        for offset in range(0, len(hashes), 500):
+            body = json.dumps({"sha256s": hashes[offset:offset + 500]}).encode()
+            status, payload = self.request(
+                "POST",
+                "/api/assets/check-hashes",
+                body,
+                {"Content-Type": "application/json", "Content-Length": str(len(body))},
+            )
+            if status != 200:
+                raise RuntimeError((payload or {}).get("error", f"去重检查失败 HTTP {status}"))
+            existing.update({
+                str(asset.get("sha256", "")).lower(): asset
+                for asset in (payload or {}).get("assets", [])
+                if asset.get("sha256")
+            })
+        return existing
+
     def upload(self, file_path, metadata):
         mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         if not (mime_type.startswith("video/") or mime_type.startswith("image/")):
@@ -183,6 +207,14 @@ def parse_args():
     return parser.parse_args()
 
 
+def file_sha256(file_path):
+    digest = hashlib.sha256()
+    with file_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
     args = parse_args()
     files = []
@@ -198,7 +230,32 @@ def main():
     print(f"已登录：{user.get('name') or user.get('email') or '当前账号'}")
     tags = [item for item in args.tags.replace(",", " ").replace("，", " ").split() if item]
     failures = 0
+    file_hashes = {}
+    hash_failures = {}
+    for file_path in files:
+        try:
+            file_hashes[file_path] = file_sha256(file_path)
+        except Exception as error:
+            hash_failures[file_path] = error
+    try:
+        existing_assets = client.find_existing(file_hashes.values())
+    except Exception as error:
+        print(f"去重检查失败，已停止上传：{error}", file=sys.stderr)
+        return 1
+    seen_hashes = {}
     for index, file_path in enumerate(files, 1):
+        if file_path in hash_failures:
+            failures += 1
+            print(f"[{index}/{len(files)}] 失败：{file_path.name}：无法计算文件哈希：{hash_failures[file_path]}", file=sys.stderr)
+            continue
+        digest = file_hashes[file_path]
+        duplicate = existing_assets.get(digest) or seen_hashes.get(digest)
+        if duplicate:
+            duplicate_name = duplicate.get("name") or "未命名素材"
+            duplicate_id = duplicate.get("id") or "未知 ID"
+            origin = "已存在素材" if digest in existing_assets else "本批次已上传"
+            print(f"[{index}/{len(files)}] 跳过：{file_path.name} -> {origin}「{duplicate_name}」({duplicate_id})")
+            continue
         name = args.name
         if name and len(files) > 1:
             name = f"{name} · {file_path.stem}"
@@ -215,6 +272,7 @@ def main():
         }
         try:
             asset = client.upload(file_path, metadata)
+            seen_hashes[digest] = asset
             print(f"[{index}/{len(files)}] 成功：{file_path.name} -> {asset.get('name')} ({asset.get('id')})")
         except Exception as error:
             failures += 1

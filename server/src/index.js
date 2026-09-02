@@ -499,6 +499,33 @@ app.delete('/api/video-accounts/:id', requireUser, async (req, res, next) => {
   }
 });
 
+app.post('/api/assets/check-hashes', requireUser, async (req, res, next) => {
+  try {
+    if (!Array.isArray(req.body?.sha256s)) return res.status(400).json({ error: 'sha256s 必须是数组' });
+    const hashes = [...new Set(req.body.sha256s
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter((value) => /^[a-f0-9]{64}$/.test(value)))].slice(0, 2000);
+    if (!hashes.length) return res.json({ assets: [] });
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (a.sha256) a.id, a.name, a.type, a.folder, a.created_at, a.sha256
+         FROM assets a
+        WHERE a.user_id=$1 AND a.deleted_at IS NULL AND a.sha256 = ANY($2::text[])
+        ORDER BY a.sha256, a.created_at DESC`,
+      [req.user.id, hashes],
+    );
+    res.json({ assets: rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      folder: row.folder,
+      createdAt: row.created_at,
+      sha256: row.sha256,
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(

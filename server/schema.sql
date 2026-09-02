@@ -52,6 +52,7 @@ ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_category TEXT NOT NULL DEF
 UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
+CREATE INDEX IF NOT EXISTS assets_user_sha256_idx ON assets(user_id, sha256) WHERE sha256 IS NOT NULL AND deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS character_albums (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
