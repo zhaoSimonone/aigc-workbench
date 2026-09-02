@@ -1314,15 +1314,22 @@ function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
               </button>
             </div>
           </div>
-          <h3>{account.accountName || "未命名账号"}</h3>
-          <a className="video-account-link" href={account.profileUrl} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} />
-            <span>{account.profileUrl}</span>
-          </a>
+          <div className="video-account-name-row">
+            <h3>{account.accountName || "未命名账号"}</h3>
+            <a
+              className="video-account-open"
+              href={account.profileUrl}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`打开${account.accountName || account.platform}主页`}
+              title="打开主页"
+            >
+              <ExternalLink size={15} />
+            </a>
+          </div>
           {account.note ? <p className="video-account-note">{account.note}</p> : <p className="video-account-note muted">暂无备注</p>}
           <div className="video-account-meta">
             <span>收藏于 {formatAccountDate(account.createdAt)}</span>
-            <a href={account.profileUrl} target="_blank" rel="noreferrer">打开主页 <ArrowUpRight size={13} /></a>
           </div>
         </article>
       ))}

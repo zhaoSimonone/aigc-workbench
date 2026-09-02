@@ -778,42 +778,36 @@ button {
   color: #b94d40;
   background: #ffebe8;
 }
-.video-account-card h3 {
+.video-account-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   margin: 20px 0 10px;
+}
+.video-account-card h3 {
+  min-width: 0;
+  margin: 0;
   overflow: hidden;
   color: #282d2e;
   font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.video-account-link {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+.video-account-open {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
   color: #bd6655;
-  font-size: 11px;
+  background: #fff2ee;
+  border-radius: 5px;
   text-decoration: none;
 }
-.video-account-link:hover {
-  color: #e15e47;
-  text-decoration: underline;
-}
-.video-account-link span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.video-account-note {
-  min-height: 34px;
-  margin: 15px 0 13px;
-  color: #6c7470;
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-.video-account-note.muted {
-  color: #adb3b0;
+.video-account-open:hover {
+  color: #fff;
+  background: #eb654d;
 }
 .video-account-meta {
   display: flex;
@@ -825,16 +819,16 @@ button {
   color: #a0a7a3;
   font-size: 10px;
 }
-.video-account-meta a {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex: 0 0 auto;
-  color: #6c8d81;
-  text-decoration: none;
+.video-account-note {
+  min-height: 34px;
+  margin: 15px 0 13px;
+  color: #6c7470;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
-.video-account-meta a:hover {
-  color: #477568;
+.video-account-note.muted {
+  color: #adb3b0;
 }
 .video-account-empty {
   display: grid;
