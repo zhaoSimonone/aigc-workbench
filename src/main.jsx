@@ -16,6 +16,7 @@ import {
   Eye,
   EyeOff,
   FileImage,
+  FileText,
   FileVideo,
   FolderOpen,
   Grid2X2,
@@ -52,6 +53,14 @@ const API_BASE = "/api";
 const LIBRARY_FOLDERS = ["灵感收集", "我的创作", "角色设定", "项目资料"];
 const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
 const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
+const PROMPT_PLATFORMS = ["可灵", "即梦", "Runway", "剪映", "CapCut", "Sora", "Veo", "其他"];
+const PROMPT_TASK_TYPES = ["视频换脸 / 发型替换", "图生视频", "文生视频", "人物动作", "运镜", "变装", "转场", "口播", "其他"];
+const PROMPT_STATUSES = ["待验证", "验证成功", "精选", "已失效"];
+const PROMPT_LINK_ROLES = [
+  { value: "input_video", label: "输入视频", hint: "动作、服装、镜头参考", types: ["video"] },
+  { value: "reference_image", label: "参考图片", hint: "人脸、发型参考", types: ["image"] },
+  { value: "generated_output", label: "生成结果", hint: "AI 生成后的作品", types: ["video", "image"] },
+];
 
 const seedAssets = [
   {
@@ -415,8 +424,10 @@ function Workspace({ user, onLogout }) {
   const [assets, setAssets] = useState([]);
   const [characterAlbums, setCharacterAlbums] = useState([]);
   const [videoAccounts, setVideoAccounts] = useState([]);
+  const [prompts, setPrompts] = useState([]);
   const [loadingAssets, setLoadingAssets] = useState(true);
   const [loadingVideoAccounts, setLoadingVideoAccounts] = useState(true);
+  const [loadingPrompts, setLoadingPrompts] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [activeFolder, setActiveFolder] = useState("全部素材");
@@ -432,6 +443,9 @@ function Workspace({ user, onLogout }) {
   const [showAlbumCreator, setShowAlbumCreator] = useState(false);
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
+  const [showPromptModal, setShowPromptModal] = useState(false);
+  const [editingPrompt, setEditingPrompt] = useState(null);
+  const [copiedPromptId, setCopiedPromptId] = useState("");
   const [editingAsset, setEditingAsset] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -441,16 +455,18 @@ function Workspace({ user, onLogout }) {
   const folderInput = useRef(null);
 
   useEffect(() => {
-    Promise.all([apiFetch("/assets"), apiFetch("/character-albums"), apiFetch("/video-accounts")])
-      .then(([assetPayload, albumPayload, accountPayload]) => {
+    Promise.all([apiFetch("/assets"), apiFetch("/character-albums"), apiFetch("/video-accounts"), apiFetch("/prompts")])
+      .then(([assetPayload, albumPayload, accountPayload, promptPayload]) => {
         setAssets((assetPayload.assets || []).map(normaliseAsset));
         setCharacterAlbums(albumPayload.albums || []);
         setVideoAccounts(accountPayload.accounts || []);
+        setPrompts(promptPayload.prompts || []);
       })
       .catch((error) => setLoadError(error.message))
       .finally(() => {
         setLoadingAssets(false);
         setLoadingVideoAccounts(false);
+        setLoadingPrompts(false);
       });
   }, []);
   const folderItems = useMemo(
@@ -476,9 +492,10 @@ function Workspace({ user, onLogout }) {
         count: assets.filter((item) => item.folder === "项目资料").length,
         icon: Archive,
       },
+      { label: "提示词库", count: prompts.length, icon: FileText },
       { label: "视频账号", count: videoAccounts.length, icon: Users },
     ],
-    [assets, videoAccounts],
+    [assets, prompts, videoAccounts],
   );
   const filteredAssets = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -692,10 +709,48 @@ function Workspace({ user, onLogout }) {
       setLoadError(error.message);
     }
   };
+  const savePrompt = async (fields, promptId) => {
+    const payload = await apiFetch(promptId ? `/prompts/${promptId}` : "/prompts", {
+      method: promptId ? "PATCH" : "POST",
+      body: JSON.stringify(fields),
+    });
+    if (promptId) {
+      setPrompts((items) => items.map((item) => (item.id === promptId ? payload.prompt : item)));
+    } else {
+      setPrompts((items) => [payload.prompt, ...items]);
+    }
+    setShowPromptModal(false);
+    setEditingPrompt(null);
+    return payload.prompt;
+  };
+  const deletePrompt = async (prompt) => {
+    if (!window.confirm(`确定删除提示词“${prompt.title}”吗？关联不会删除素材本身。`)) return;
+    try {
+      await apiFetch(`/prompts/${prompt.id}`, { method: "DELETE" });
+      setPrompts((items) => items.filter((item) => item.id !== prompt.id));
+    } catch (error) {
+      setLoadError(error.message);
+    }
+  };
+  const copyPrompt = async (prompt) => {
+    try {
+      await navigator.clipboard.writeText(prompt.content);
+      setCopiedPromptId(prompt.id);
+      window.setTimeout(() => setCopiedPromptId((id) => (id === prompt.id ? "" : id)), 1800);
+    } catch (_) {
+      setLoadError("无法复制提示词，请检查浏览器剪贴板权限");
+    }
+  };
   const total = assets.length;
   const videoCount = assets.filter((item) => item.type === "video").length;
   const imageCount = assets.filter((item) => item.type === "image").length;
   const usedCount = assets.filter((item) => item.used).length;
+  const verifiedPromptCount = prompts.filter((item) => item.status === "验证成功" || item.status === "精选").length;
+  const featuredPromptCount = prompts.filter((item) => item.status === "精选").length;
+  const promptOutputCount = prompts.reduce(
+    (count, item) => count + (item.assetLinks || []).filter((link) => link.usageRole === "generated_output").length,
+    0,
+  );
   const stats = [
     {
       label: "素材总数",
@@ -726,9 +781,17 @@ function Workspace({ user, onLogout }) {
       tone: "green",
     },
   ];
+  const promptStats = [
+    { label: "提示词总数", value: prompts.length, hint: prompts.length ? "持续积累" : "开始沉淀", icon: FileText, tone: "red" },
+    { label: "已验证", value: verifiedPromptCount, hint: prompts.length ? "可复用" : "待验证", icon: CircleCheck, tone: "green" },
+    { label: "精选提示词", value: featuredPromptCount, hint: featuredPromptCount ? "效果稳定" : "尚未标记", icon: Heart, tone: "yellow" },
+    { label: "关联作品", value: promptOutputCount, hint: promptOutputCount ? "已有生成结果" : "等待关联", icon: Play, tone: "blue" },
+  ];
   const libraryTitle = activeCharacter ? `角色设定 / ${activeCharacter}` : activeFolder;
   const isRoleAlbumView = activeFolder === "角色设定" && !activeCharacter;
+  const isPromptView = activeFolder === "提示词库";
   const isVideoAccountView = activeFolder === "视频账号";
+  const displayStats = isPromptView ? promptStats : stats;
   const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
     ? activeFolder
     : "灵感收集";
@@ -912,11 +975,16 @@ function Workspace({ user, onLogout }) {
               <p className="eyebrow">
                 MONDAY, AUG 31 <span className="eyebrow-dot" /> 09:46
               </p>
-              <h1>素材库</h1>
-              <p className="intro-copy">把灵感收好，下一条作品会更快开始。</p>
+              <h1>{isPromptView ? "提示词库" : "素材库"}</h1>
+              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : "把灵感收好，下一条作品会更快开始。"}</p>
             </div>
             <div className="intro-actions">
-              {isVideoAccountView ? (
+              {isPromptView ? (
+                <button className="primary-button" onClick={() => setShowPromptModal(true)}>
+                  <Plus size={18} />
+                  新增提示词
+                </button>
+              ) : isVideoAccountView ? (
                 <button className="primary-button" onClick={() => setShowVideoAccountModal(true)}>
                   <Plus size={18} />
                   收藏视频账号
@@ -959,7 +1027,7 @@ function Workspace({ user, onLogout }) {
             </div>
           </section>
           <section className="stat-grid">
-            {stats.map(({ label, value, hint, icon: Icon, tone }) => (
+            {displayStats.map(({ label, value, hint, icon: Icon, tone }) => (
               <div className="stat-card" key={label}>
                 <div className={`stat-icon ${tone}`}>
                   <Icon size={17} />
@@ -979,14 +1047,16 @@ function Workspace({ user, onLogout }) {
                 <h2>
                   {libraryTitle}{" "}
                   <span>
-                    {isVideoAccountView
+                    {isPromptView
+                      ? `${prompts.length} 条提示词`
+                      : isVideoAccountView
                       ? `${videoAccounts.length} 个账号`
                       : isRoleAlbumView
                       ? `${roleAlbums.length} 个角色`
                       : filteredAssets.length !== assets.length
                       ? `${filteredAssets.length} / `
                       : ""}
-                    {!isRoleAlbumView && !isVideoAccountView && total}
+                    {!isRoleAlbumView && !isVideoAccountView && !isPromptView && total}
                   </span>
                 </h2>
                 {activeCharacter && (
@@ -994,7 +1064,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1008,7 +1078,20 @@ function Workspace({ user, onLogout }) {
             </div>
           </div>
           {loadError && <div className="inline-error">{loadError}</div>}
-          {isVideoAccountView ? (
+          {isPromptView ? (
+            <PromptLibrary
+              prompts={prompts}
+              assets={assets}
+              loading={loadingPrompts}
+              copiedPromptId={copiedPromptId}
+              onCreate={() => setShowPromptModal(true)}
+              onCopy={copyPrompt}
+              onEdit={(prompt) => setEditingPrompt(prompt)}
+              onDelete={deletePrompt}
+              onToggleFavorite={(prompt) => savePrompt({ favorite: !prompt.favorite }, prompt.id).catch((error) => setLoadError(error.message))}
+              onOpenAsset={openAsset}
+            />
+          ) : isVideoAccountView ? (
             <VideoAccountsPanel
               accounts={videoAccounts}
               loading={loadingVideoAccounts}
@@ -1267,6 +1350,18 @@ function Workspace({ user, onLogout }) {
           onSave={(fields) => saveVideoAccount(fields, editingVideoAccount?.id)}
         />
       )}
+      {(showPromptModal || editingPrompt) && (
+        <PromptModal
+          key={editingPrompt?.id || "new"}
+          prompt={editingPrompt}
+          assets={assets}
+          onClose={() => {
+            setShowPromptModal(false);
+            setEditingPrompt(null);
+          }}
+          onSave={(fields) => savePrompt(fields, editingPrompt?.id)}
+        />
+      )}
       {editingAsset && (
         <EditAssetModal
           asset={editingAsset}
@@ -1277,6 +1372,273 @@ function Workspace({ user, onLogout }) {
       )}
     </div>
   );
+}
+
+function PromptLibrary({ prompts, assets, loading, copiedPromptId, onCreate, onCopy, onEdit, onDelete, onToggleFavorite, onOpenAsset }) {
+  const [query, setQuery] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [status, setStatus] = useState("");
+  const [tag, setTag] = useState("");
+  const platforms = useMemo(() => [...new Set(prompts.map((item) => item.platform).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh")), [prompts]);
+  const tags = useMemo(() => [...new Set(prompts.flatMap((item) => item.tags || []))].sort((a, b) => a.localeCompare(b, "zh")), [prompts]);
+  const filteredPrompts = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return prompts.filter((prompt) => {
+      const inPlatform = !platform || prompt.platform === platform;
+      const inStatus = !status || prompt.status === status;
+      const inTag = !tag || (prompt.tags || []).includes(tag);
+      const inSearch = !normalized || `${prompt.title} ${prompt.content} ${prompt.taskType} ${prompt.model} ${(prompt.tags || []).join(" ")}`.toLowerCase().includes(normalized);
+      return inPlatform && inStatus && inTag && inSearch;
+    });
+  }, [platform, prompts, query, status, tag]);
+  const resetFilters = () => {
+    setQuery("");
+    setPlatform("");
+    setStatus("");
+    setTag("");
+  };
+  if (loading) {
+    return <div className="empty-state"><div className="empty-icon"><Cloud size={22} /></div><h3>正在加载提示词</h3><p>同步你的创作方法与关联素材</p></div>;
+  }
+  return (
+    <>
+      <div className="prompt-toolbar">
+        <div className="search-box prompt-search-box">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提示词、场景或标签" />
+        </div>
+        <div className="prompt-filter-controls">
+          <select value={platform} onChange={(event) => setPlatform(event.target.value)} aria-label="筛选平台">
+            <option value="">全部平台</option>
+            {platforms.map((item) => <option key={item}>{item}</option>)}
+          </select>
+          <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="筛选状态">
+            <option value="">全部状态</option>
+            {PROMPT_STATUSES.map((item) => <option key={item}>{item}</option>)}
+          </select>
+          <select value={tag} onChange={(event) => setTag(event.target.value)} aria-label="筛选标签">
+            <option value="">全部标签</option>
+            {tags.map((item) => <option key={item}>{item}</option>)}
+          </select>
+        </div>
+      </div>
+      {!filteredPrompts.length ? (
+        <div className="video-account-empty prompt-empty">
+          <div className="empty-icon"><FileText size={22} /></div>
+          <h3>{prompts.length ? "没有找到匹配提示词" : "还没有沉淀提示词"}</h3>
+          <p>{prompts.length ? "试试更换搜索词或筛选条件。" : "完整粘贴一次有效提示词，再关联输入素材和生成结果。"}</p>
+          <button className="primary-button" onClick={prompts.length ? resetFilters : onCreate}><Plus size={16} />{prompts.length ? "清除筛选" : "新增第一条提示词"}</button>
+        </div>
+      ) : (
+        <div className="prompt-grid">
+          {filteredPrompts.map((prompt) => (
+            <article className="prompt-card" key={prompt.id}>
+              <div className="prompt-card-head">
+                <div className="prompt-badges">
+                  <span className="prompt-platform-badge">{prompt.platform}</span>
+                  <span className="prompt-status-badge" data-status={prompt.status}>{prompt.status}</span>
+                </div>
+                <div className="prompt-card-actions">
+                  <button onClick={() => onCopy(prompt)} aria-label={`复制${prompt.title}`} title={copiedPromptId === prompt.id ? "已复制" : "复制提示词"}>
+                    {copiedPromptId === prompt.id ? <Check size={15} /> : <Copy size={15} />}
+                  </button>
+                  <button className={prompt.favorite ? "active" : ""} onClick={() => onToggleFavorite(prompt)} aria-label={prompt.favorite ? "取消收藏" : "收藏"} title={prompt.favorite ? "取消收藏" : "收藏"}>
+                    <Heart size={15} fill={prompt.favorite ? "currentColor" : "none"} />
+                  </button>
+                  <button onClick={() => onEdit(prompt)} aria-label={`编辑${prompt.title}`} title="编辑"><Pencil size={15} /></button>
+                  <button className="prompt-delete" onClick={() => onDelete(prompt)} aria-label={`删除${prompt.title}`} title="删除"><Trash2 size={15} /></button>
+                </div>
+              </div>
+              <h3 title={prompt.title}>{prompt.title}</h3>
+              {(prompt.taskType || prompt.model) && (
+                <div className="prompt-model-meta">{[prompt.taskType, prompt.model].filter(Boolean).join(" · ")}</div>
+              )}
+              <p className="prompt-content-preview">{prompt.content}</p>
+              {(prompt.tags || []).length > 0 && <div className="tag-row prompt-tag-row">{prompt.tags.map((item) => <span key={item}>#{item}</span>)}</div>}
+              <PromptAssetLinks assetLinks={prompt.assetLinks} assets={assets} onOpenAsset={onOpenAsset} />
+              <div className="prompt-card-foot">
+                <span>{prompt.rating ? `${prompt.rating} / 5 分` : "未评分"}</span>
+                <span>更新于 {formatPromptDate(prompt.updatedAt)}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function PromptAssetLinks({ assetLinks = [], assets, onOpenAsset }) {
+  const assetById = useMemo(() => new Map(assets.map((asset) => [String(asset.id), asset])), [assets]);
+  const links = assetLinks.map((link) => ({ ...link, asset: assetById.get(String(link.assetId)) })).filter((link) => link.asset);
+  if (!links.length) return <div className="prompt-linked-assets prompt-linked-assets-empty"><span>尚未关联素材</span></div>;
+  return (
+    <div className="prompt-linked-assets">
+      {links.map((link) => {
+        const role = PROMPT_LINK_ROLES.find((item) => item.value === link.usageRole) || { label: "关联素材" };
+        return (
+          <button key={`${link.assetId}-${link.usageRole}`} onClick={() => onOpenAsset(link.asset)} title={`打开${role.label}：${link.asset.name}`}>
+            <span>{role.label}</span>
+            <strong>{link.asset.name}</strong>
+            <ChevronRight size={13} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PromptModal({ prompt, assets, onClose, onSave }) {
+  const initialLinks = Object.fromEntries(PROMPT_LINK_ROLES.map((role) => [
+    role.value,
+    String((prompt?.assetLinks || []).find((link) => link.usageRole === role.value)?.assetId || ""),
+  ]));
+  const [title, setTitle] = useState(prompt?.title || "");
+  const [content, setContent] = useState(prompt?.content || "");
+  const [platform, setPlatform] = useState(prompt?.platform || PROMPT_PLATFORMS[0]);
+  const [taskType, setTaskType] = useState(prompt?.taskType || "");
+  const [model, setModel] = useState(prompt?.model || "");
+  const [tagsText, setTagsText] = useState((prompt?.tags || []).join(" "));
+  const [status, setStatus] = useState(prompt?.status || "待验证");
+  const [rating, setRating] = useState(prompt?.rating ? String(prompt.rating) : "");
+  const [note, setNote] = useState(prompt?.note || "");
+  const [favorite, setFavorite] = useState(Boolean(prompt?.favorite));
+  const [linkSelections, setLinkSelections] = useState(initialLinks);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!title.trim()) {
+      setError("请输入提示词名称");
+      return;
+    }
+    if (!content.trim()) {
+      setError("请输入完整提示词");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({
+        title: title.trim(),
+        content: content.trim(),
+        platform,
+        taskType,
+        model: model.trim(),
+        tags: tagsText.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean).slice(0, 30),
+        status,
+        rating: rating ? Number(rating) : null,
+        favorite,
+        note: note.trim(),
+        assetLinks: PROMPT_LINK_ROLES
+          .map((role) => ({ assetId: linkSelections[role.value], usageRole: role.value }))
+          .filter((link) => link.assetId),
+      });
+    } catch (saveError) {
+      setError(saveError.message || "保存失败，请稍后重试");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal-layer edit-layer" onClick={onClose}>
+      <form className="edit-modal prompt-modal" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">{prompt ? "EDIT PROMPT" : "SAVE A PROMPT"}</p>
+            <h2>{prompt ? "编辑提示词" : "新增提示词"}</h2>
+            <p className="modal-subtitle">整段原样保存，无需拆分正向和负向提示词。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+        </div>
+        <div className="edit-form-grid prompt-form-grid">
+          <label className="edit-field-wide">
+            提示词名称
+            <input value={title} onChange={(event) => setTitle(event.target.value)} autoFocus placeholder="例如 视频换脸换发型｜保持原服装与镜头" />
+          </label>
+          <label>
+            使用平台
+            <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
+              {PROMPT_PLATFORMS.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
+          <label>
+            使用场景 <small>可选</small>
+            <select value={taskType} onChange={(event) => setTaskType(event.target.value)}>
+              <option value="">请选择场景</option>
+              {PROMPT_TASK_TYPES.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
+          <label className="edit-field-wide prompt-content-field">
+            完整提示词
+            <textarea value={content} onChange={(event) => setContent(event.target.value)} rows="12" placeholder="完整粘贴你的提示词，包括要求保持的内容和需要避免的问题。" />
+            <small>原文会完整保存，不会自动拆分、改写或遗漏。</small>
+          </label>
+          <div className="prompt-link-fields edit-field-wide">
+            <div className="prompt-link-fields-head">
+              <strong>关联素材</strong>
+              <small>可选：关联输入、参考和生成结果，方便回看效果。</small>
+            </div>
+            <div className="prompt-link-grid">
+              {PROMPT_LINK_ROLES.map((role) => {
+                const options = assets.filter((asset) => role.types.includes(asset.type));
+                return (
+                  <label key={role.value}>
+                    <span>{role.label}</span>
+                    <select value={linkSelections[role.value]} onChange={(event) => setLinkSelections((items) => ({ ...items, [role.value]: event.target.value }))}>
+                      <option value="">暂不关联</option>
+                      {options.map((asset) => <option value={asset.id} key={asset.id}>{asset.name}</option>)}
+                    </select>
+                    <small>{role.hint}</small>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <label>
+            标签 <small>可选</small>
+            <input value={tagsText} onChange={(event) => setTagsText(event.target.value)} placeholder="换脸、换发型、人物一致性" />
+          </label>
+          <label>
+            模型版本 <small>可选</small>
+            <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="例如 可灵 1.6" />
+          </label>
+          <label>
+            验证状态
+            <select value={status} onChange={(event) => setStatus(event.target.value)}>
+              {PROMPT_STATUSES.map((item) => <option key={item}>{item}</option>)}
+            </select>
+          </label>
+          <label>
+            效果评分 <small>可选</small>
+            <select value={rating} onChange={(event) => setRating(event.target.value)}>
+              <option value="">暂不评分</option>
+              {[1, 2, 3, 4, 5].map((item) => <option value={item} key={item}>{item} / 5</option>)}
+            </select>
+          </label>
+          <label className="edit-field-wide">
+            使用备注 <small>可选</small>
+            <textarea value={note} onChange={(event) => setNote(event.target.value)} rows="3" placeholder="记录关键观察点，例如领口、发型稳定性和人物身份一致性。" />
+          </label>
+          <button type="button" className={`prompt-favorite-toggle ${favorite ? "active" : ""}`} onClick={() => setFavorite(!favorite)}>
+            <Heart size={15} fill={favorite ? "currentColor" : "none"} />
+            {favorite ? "已收藏这条提示词" : "收藏这条提示词"}
+          </button>
+        </div>
+        {error && <div className="auth-error edit-error">{error}</div>}
+        <div className="modal-foot">
+          <button type="button" className="text-button" onClick={onClose}>取消</button>
+          <button type="submit" className="primary-button" disabled={saving}><Check size={16} />{saving ? "保存中…" : "保存提示词"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function formatPromptDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "刚刚";
+  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
 function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {

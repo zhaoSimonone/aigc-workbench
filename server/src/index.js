@@ -416,6 +416,90 @@ function validateProfileUrl(value) {
   return url.slice(0, 2000);
 }
 
+const promptStatuses = new Set(['待验证', '验证成功', '精选', '已失效']);
+const promptUsageRoles = new Set(['input_video', 'reference_image', 'generated_output', 'other']);
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalisePromptStatus(value) {
+  const status = String(value || '待验证').trim() || '待验证';
+  if (!promptStatuses.has(status)) throw new Error('提示词状态无效');
+  return status;
+}
+
+function normalisePromptRating(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const rating = Number(value);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('评分必须是 1 到 5');
+  return rating;
+}
+
+function normalisePromptLinks(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('关联素材必须是数组');
+  const links = new Map();
+  for (const item of value.slice(0, 30)) {
+    const assetId = String(item?.assetId || '').trim();
+    const usageRole = String(item?.usageRole || 'other').trim() || 'other';
+    if (!uuidPattern.test(assetId)) throw new Error('关联素材 ID 无效');
+    if (!promptUsageRoles.has(usageRole)) throw new Error('关联素材角色无效');
+    links.set(`${assetId}:${usageRole}`, { assetId, usageRole });
+  }
+  return [...links.values()];
+}
+
+function publicPrompt(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    content: row.content,
+    platform: row.platform,
+    taskType: row.task_type,
+    model: row.model,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    status: row.status,
+    favorite: row.favorite,
+    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating),
+    note: row.note,
+    assetLinks: Array.isArray(row.asset_links) ? row.asset_links : [],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function promptQuery(id, userId, client = pool) {
+  const { rows } = await client.query(
+    `SELECT p.*, COALESCE(
+        json_agg(json_build_object('assetId', pal.asset_id, 'usageRole', pal.usage_role) ORDER BY pal.created_at)
+        FILTER (WHERE pal.asset_id IS NOT NULL),
+        '[]'::json
+      ) AS asset_links
+       FROM prompts p
+       LEFT JOIN prompt_asset_links pal ON pal.prompt_id=p.id
+      WHERE p.id=$1 AND p.user_id=$2
+      GROUP BY p.id`,
+    [id, userId],
+  );
+  return rows[0];
+}
+
+async function replacePromptLinks(client, promptId, userId, links) {
+  const assetIds = [...new Set(links.map((link) => link.assetId))];
+  if (assetIds.length) {
+    const { rows } = await client.query(
+      'SELECT id FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
+      [userId, assetIds],
+    );
+    if (rows.length !== assetIds.length) throw new Error('关联素材不存在或不属于当前账号');
+  }
+  await client.query('DELETE FROM prompt_asset_links WHERE prompt_id=$1 AND user_id=$2', [promptId, userId]);
+  for (const link of links) {
+    await client.query(
+      'INSERT INTO prompt_asset_links(prompt_id,asset_id,user_id,usage_role) VALUES($1,$2,$3,$4)',
+      [promptId, link.assetId, userId, link.usageRole],
+    );
+  }
+}
+
 app.get('/api/video-accounts', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
@@ -493,6 +577,131 @@ app.delete('/api/video-accounts/:id', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query('DELETE FROM video_accounts WHERE id=$1 AND user_id=$2 RETURNING id', [req.params.id, req.user.id]);
     if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/prompts', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*, COALESCE(
+          json_agg(json_build_object('assetId', pal.asset_id, 'usageRole', pal.usage_role) ORDER BY pal.created_at)
+          FILTER (WHERE pal.asset_id IS NOT NULL),
+          '[]'::json
+        ) AS asset_links
+         FROM prompts p
+         LEFT JOIN prompt_asset_links pal ON pal.prompt_id=p.id
+        WHERE p.user_id=$1
+        GROUP BY p.id
+        ORDER BY p.updated_at DESC`,
+      [req.user.id],
+    );
+    res.json({ prompts: rows.map(publicPrompt) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/prompts', requireUser, async (req, res, next) => {
+  try {
+    const title = String(req.body.title || '').trim().slice(0, 180);
+    const content = String(req.body.content || '').trim().slice(0, 30000);
+    if (!title) return res.status(400).json({ error: '请输入提示词名称' });
+    if (!content) return res.status(400).json({ error: '请输入完整提示词' });
+    const platform = String(req.body.platform || '其他').trim().slice(0, 80) || '其他';
+    const taskType = String(req.body.taskType || '').trim().slice(0, 100);
+    const model = String(req.body.model || '').trim().slice(0, 120);
+    const tags = parseTags(req.body.tags);
+    const status = normalisePromptStatus(req.body.status);
+    const favorite = req.body.favorite === true || req.body.favorite === 'true';
+    const rating = normalisePromptRating(req.body.rating);
+    const note = String(req.body.note || '').trim().slice(0, 5000);
+    const links = normalisePromptLinks(req.body.assetLinks || []);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `INSERT INTO prompts(user_id,title,content,platform,task_type,model,tags,status,favorite,rating,note)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+        [req.user.id, title, content, platform, taskType, model, tags, status, favorite, rating, note],
+      );
+      await replacePromptLinks(client, rows[0].id, req.user.id, links);
+      await client.query('COMMIT');
+      const prompt = await promptQuery(rows[0].id, req.user.id);
+      res.status(201).json({ prompt: publicPrompt(prompt) });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    if (['提示词状态无效', '评分必须是 1 到 5', '关联素材必须是数组', '关联素材 ID 无效', '关联素材角色无效', '关联素材不存在或不属于当前账号'].includes(error.message)) {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+app.patch('/api/prompts/:id', requireUser, async (req, res, next) => {
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: existingRows } = await client.query(
+        'SELECT * FROM prompts WHERE id=$1 AND user_id=$2 FOR UPDATE',
+        [req.params.id, req.user.id],
+      );
+      const existing = existingRows[0];
+      if (!existing) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: '提示词不存在' });
+      }
+      const value = (key, current) => Object.prototype.hasOwnProperty.call(req.body, key) ? req.body[key] : current;
+      const title = String(value('title', existing.title) || '').trim().slice(0, 180);
+      const content = String(value('content', existing.content) || '').trim().slice(0, 30000);
+      if (!title) throw new Error('请输入提示词名称');
+      if (!content) throw new Error('请输入完整提示词');
+      const platform = String(value('platform', existing.platform) || '其他').trim().slice(0, 80) || '其他';
+      const taskType = String(value('taskType', existing.task_type) || '').trim().slice(0, 100);
+      const model = String(value('model', existing.model) || '').trim().slice(0, 120);
+      const tags = Object.prototype.hasOwnProperty.call(req.body, 'tags') ? parseTags(req.body.tags) : existing.tags;
+      const status = Object.prototype.hasOwnProperty.call(req.body, 'status') ? normalisePromptStatus(req.body.status) : existing.status;
+      const favorite = Object.prototype.hasOwnProperty.call(req.body, 'favorite') ? (req.body.favorite === true || req.body.favorite === 'true') : existing.favorite;
+      const rating = Object.prototype.hasOwnProperty.call(req.body, 'rating') ? normalisePromptRating(req.body.rating) : existing.rating;
+      const note = String(value('note', existing.note) || '').trim().slice(0, 5000);
+      await client.query(
+        `UPDATE prompts
+            SET title=$1, content=$2, platform=$3, task_type=$4, model=$5, tags=$6, status=$7, favorite=$8, rating=$9, note=$10, updated_at=now()
+          WHERE id=$11 AND user_id=$12`,
+        [title, content, platform, taskType, model, tags, status, favorite, rating, note, existing.id, req.user.id],
+      );
+      if (Object.prototype.hasOwnProperty.call(req.body, 'assetLinks')) {
+        await replacePromptLinks(client, existing.id, req.user.id, normalisePromptLinks(req.body.assetLinks));
+      }
+      await client.query('COMMIT');
+      const prompt = await promptQuery(existing.id, req.user.id);
+      res.json({ prompt: publicPrompt(prompt) });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    if (['提示词状态无效', '评分必须是 1 到 5', '关联素材必须是数组', '关联素材 ID 无效', '关联素材角色无效', '关联素材不存在或不属于当前账号', '请输入提示词名称', '请输入完整提示词'].includes(error.message)) {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+app.delete('/api/prompts/:id', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query('DELETE FROM prompts WHERE id=$1 AND user_id=$2 RETURNING id', [req.params.id, req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: '提示词不存在' });
     res.status(204).end();
   } catch (error) {
     next(error);
