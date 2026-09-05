@@ -1375,6 +1375,159 @@ button {
   margin: 0 0 7px;
   font-size: 11px;
 }
+.music-library-panel {
+  margin-top: 22px;
+}
+.music-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 0 16px;
+  border-bottom: 1px solid #e3e4df;
+}
+.music-toolbar .search-box {
+  width: min(300px, 100%);
+}
+.music-status-tabs {
+  display: flex;
+  gap: 4px;
+  margin-right: auto;
+}
+.music-status-tabs button {
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: transparent;
+  color: #838b87;
+  font-size: 11px;
+}
+.music-status-tabs button:hover,
+.music-status-tabs button.active {
+  color: #a54e3d;
+  background: #fff0eb;
+}
+.music-track-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 17px;
+}
+.music-track-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 15px 16px;
+  background: #fff;
+  border: 1px solid #e5e6e1;
+  border-radius: 8px;
+}
+.music-track-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  color: #bd6655;
+  background: #fff0eb;
+  border-radius: 7px;
+}
+.music-track-main {
+  min-width: 0;
+  flex: 1;
+}
+.music-track-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.music-track-heading strong {
+  color: #2e3434;
+  font-size: 13px;
+}
+.music-status {
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+.music-status-pending { color: #a57624; background: #fff7de; }
+.music-status-ok { color: #4b916f; background: #eaf7ef; }
+.music-status-muted { color: #8b9290; background: #f0f1ef; }
+.music-track-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  color: #929996;
+  font-size: 10px;
+}
+.music-track-meta i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #c3c8c4;
+}
+.music-track-sources,
+.music-track-note {
+  margin: 7px 0 0;
+  color: #777f7b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.music-track-note { color: #a17a70; }
+.music-track-main audio {
+  display: block;
+  width: min(460px, 100%);
+  height: 32px;
+  margin-top: 10px;
+}
+.music-edit-button {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.music-empty-state { margin-top: 22px; }
+.music-track-modal {
+  max-height: min(720px, calc(100vh - 40px));
+  overflow-y: auto;
+}
+.music-track-modal label {
+  display: grid;
+  gap: 7px;
+  margin-top: 15px;
+  color: #6f7773;
+  font-size: 11px;
+  font-weight: 600;
+}
+.music-track-modal input,
+.music-track-modal select,
+.music-track-modal textarea {
+  width: 100%;
+  padding: 10px 11px;
+  color: #343a3a;
+  background: #fff;
+  border: 1px solid #dfe1dc;
+  border-radius: 6px;
+  outline: none;
+  font-size: 12px;
+}
+.music-track-modal textarea { resize: vertical; }
+.music-track-modal input:focus,
+.music-track-modal select:focus,
+.music-track-modal textarea:focus { border-color: #e58470; box-shadow: 0 0 0 3px rgba(229, 132, 112, 0.12); }
+.music-track-hash {
+  margin: 15px 0 0;
+  padding: 8px 9px;
+  color: #8d9590;
+  background: #f4f5f2;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+  font: 10px "DM Mono", monospace;
+}
+.music-track-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 21px;
+}
 .drawer-layer,
 .modal-layer {
   position: fixed;

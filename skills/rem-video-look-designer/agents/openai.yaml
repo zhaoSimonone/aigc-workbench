@@ -1,0 +1,8 @@
+interface:
+  display_name: "蕾姆视频妆造设计器"
+  short_description: "分析视频前半段并生成适配风格与动作的蕾姆妆造参考图"
+  brand_color: "#7AA7E8"
+  default_prompt: "使用 $rem-video-look-designer 分析这个视频，并生成适配前半段的蕾姆妆造参考图。"
+
+policy:
+  allow_implicit_invocation: true

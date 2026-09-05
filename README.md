@@ -9,6 +9,7 @@
 - 拖拽或选择本地图片/视频上传到腾讯云 COS，并保存素材元数据
 - 登录后可通过 `POST /api/assets/import-urls` 批量导入可访问的 OSS/对象存储视频链接
 - 视频预览使用服务端同源 Range 流，兼容移动端在线播放
+- 音乐库：从全部视频提取标准化音轨，按 SHA-256 精确去重，支持试听和人工标记
 - 注册/登录与按账号隔离的数据，可将创作作品关联到多个参考素材
 - 桌面端与移动端布局
 
@@ -76,4 +77,21 @@ Content-Type: application/json
 
 服务端会下载链接内容、上传到腾讯云 COS、生成视频封面和时长，并将素材写入当前账号的数据库。返回 `results` 数组，每条包含 `ok` 和 `asset` 或 `error`，单条失败不会影响其他条目。链接需要在服务器上可访问，支持 HTTP(S) 视频地址（包括带签名参数的私有 OSS 链接）；原链接会保存到素材的“原视频链接”。
 
+## 素材整理与音乐元数据
+
+仓库内的 `skills/aigc-asset-organize` skill 可按素材 ID 或文件夹读取素材，基于实际画面和音轨提出标题、标签、备注及音乐识别结果。它先输出逐字段 diff，只有用户明确确认后才写回；批量写回使用 `PATCH /api/assets/:id/organize`，请求体可包含 `name`、`tags`、`note`、`folder` 和 `musicTitle`、`musicArtist`、`musicSource`、`musicStatus`、`musicConfidence`、`musicEvidence`。音乐无法可靠识别时应记录待确认状态，不要猜测曲名。
+
+网页侧边栏的“音乐库”用于查看、试听和人工标记。音频整理由本地 skill 完成：本地下载视频并使用 FFmpeg/ffprobe 将第一条音轨转成单声道 44.1kHz PCM WAV 后计算 SHA-256，再把音频和关联关系上传到服务端；服务端不下载视频、不解析音频。同一标准化音频只保存一份 COS 对象，多个视频关联到同一曲目。这是精确内容去重，不是声学歌曲识别，新曲目默认“待标记”，可在音乐库中人工填写库内名称、曲名、艺人和备注。
+
+也可以使用 skill 命令行构建。构建会写入音频对象和数据库关系，必须显式确认：
+
+```bash
+python3 skills/aigc-asset-organize/scripts/organize_assets.py music-library
+python3 skills/aigc-asset-organize/scripts/organize_assets.py music-library --build --confirm --json
+```
+
 `.env.example` 已写入桶名和区域占位符（当前桶实际地域为 `ap-shanghai`）。域名 `aigc.chatcanvas.online` 可在 Nginx 中反向代理到 Vite 构建产物和服务端 API；不要把 `/Users/simon/Desktop/dev/cloud/tencent` 下的凭据目录复制到仓库。
+
+## 蕾姆视频妆造 Skill
+
+`skills/rem-video-look-designer` 已配置 hairfree 图像接口、`gpt-image-2`、竖屏尺寸、high 质量和 JSON generations 请求。生成脚本只从环境变量读取 `IMAGE_API_KEY`；其余默认值已内置，也可用 `.env.example` 中的 `IMAGE_API_BASE`、`IMAGE_MODEL`、`IMAGE_SIZE`、`IMAGE_QUALITY` 和 `IMAGE_ENDPOINT_MODE` 覆盖。不要把实际密钥写入仓库。

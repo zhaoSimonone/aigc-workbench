@@ -268,6 +268,12 @@ async function hydrateAsset(row) {
     used: row.used,
     folder: row.folder,
     note: row.note,
+    musicTitle: row.music_title || '',
+    musicArtist: row.music_artist || '',
+    musicSource: row.music_source || '',
+    musicStatus: row.music_status || '',
+    musicConfidence: row.music_confidence || '',
+    musicEvidence: row.music_evidence || '',
     parentAssetIds: row.parent_asset_ids || [],
     derivedAssetIds: row.derived_asset_ids || [],
   };
@@ -918,7 +924,8 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
     const sha256 = await hashFile(tempPath);
     const { rows } = await pool.query(
       `UPDATE assets
-          SET object_key=$1, thumb_key=$2, content_type=$3, size_bytes=$4, sha256=$5, duration_seconds=$6
+          SET object_key=$1, thumb_key=$2, content_type=$3, size_bytes=$4, sha256=$5, duration_seconds=$6,
+              music_title='', music_artist='', music_source='', music_status='', music_confidence='', music_evidence=''
         WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL
         RETURNING *`,
       [uploadedKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, req.params.id, req.user.id],
@@ -930,6 +937,7 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
       ]);
       return res.status(404).json({ error: '素材不存在' });
     }
+    if (type === 'video') await pool.query('DELETE FROM asset_music WHERE asset_id=$1', [req.params.id]);
     const hydrated = await assetQuery(req.params.id, req.user.id);
     await Promise.all([
       deleteObject(current.object_key).catch((error) => console.warn('Old asset cleanup skipped:', error.message)),
@@ -995,16 +1003,27 @@ app.post('/api/assets/import-urls', requireUser, async (req, res, next) => {
 
 app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
   try {
-    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory'];
+    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory', 'musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'];
     const fields = [];
     const values = [];
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) {
-        const dbKey = key === 'sourceUrl' ? 'source_url' : key === 'characterName' ? 'character_name' : key === 'characterCategory' ? 'character_category' : key;
+        const dbKey = key === 'sourceUrl' ? 'source_url'
+          : key === 'characterName' ? 'character_name'
+            : key === 'characterCategory' ? 'character_category'
+              : key === 'musicTitle' ? 'music_title'
+                : key === 'musicArtist' ? 'music_artist'
+                  : key === 'musicSource' ? 'music_source'
+                    : key === 'musicStatus' ? 'music_status'
+                      : key === 'musicConfidence' ? 'music_confidence'
+                        : key === 'musicEvidence' ? 'music_evidence'
+                          : key;
         const value = key === 'characterName'
           ? String(req.body[key] || '').trim().slice(0, 120)
           : key === 'characterCategory'
             ? String(req.body[key] || '').trim().slice(0, 40)
+            : ['musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'].includes(key)
+              ? String(req.body[key] || '').trim().slice(0, key === 'musicEvidence' ? 1000 : 200)
             : key === 'folder' && String(req.body[key]) === '成片'
               ? '我的创作'
               : req.body[key];
@@ -1144,6 +1163,310 @@ app.post('/api/assets/:id/tags', requireUser, async (req, res, next) => {
     } finally {
       client.release();
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
+  const assetFields = [
+    ['name', 'name', (value) => safeName(value)],
+    ['note', 'note', (value) => String(value || '').trim().slice(0, 5000)],
+    ['folder', 'folder', (value) => (String(value || '').trim() === '成片' ? '我的创作' : String(value || '').trim()).slice(0, 80)],
+    ['source', 'source', (value) => String(value || '').trim().slice(0, 120)],
+    ['sourceUrl', 'source_url', (value) => String(value || '').trim().slice(0, 2000)],
+    ['characterName', 'character_name', (value) => String(value || '').trim().slice(0, 120)],
+    ['characterCategory', 'character_category', (value) => String(value || '').trim().slice(0, 40)],
+    ['musicTitle', 'music_title', (value) => String(value || '').trim().slice(0, 200)],
+    ['musicArtist', 'music_artist', (value) => String(value || '').trim().slice(0, 200)],
+    ['musicSource', 'music_source', (value) => String(value || '').trim().slice(0, 200)],
+    ['musicStatus', 'music_status', (value) => String(value || '').trim().slice(0, 40)],
+    ['musicConfidence', 'music_confidence', (value) => String(value || '').trim().slice(0, 40)],
+    ['musicEvidence', 'music_evidence', (value) => String(value || '').trim().slice(0, 1000)],
+  ];
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const exists = await client.query('SELECT * FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR UPDATE', [req.params.id, req.user.id]);
+      if (!exists.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: '素材不存在' });
+      }
+      const fields = [];
+      const values = [];
+      for (const [key, dbKey, normalise] of assetFields) {
+        if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+          values.push(normalise(req.body[key]));
+          fields.push(`${dbKey}=$${values.length}`);
+        }
+      }
+      if (fields.length) {
+        values.push(req.params.id, req.user.id);
+        await client.query(`UPDATE assets SET ${fields.join(', ')} WHERE id=$${values.length - 1} AND user_id=$${values.length}`, values);
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'tags')) {
+        const tags = parseTags(req.body.tags);
+        await client.query('DELETE FROM asset_tags WHERE asset_id=$1', [req.params.id]);
+        for (const tag of tags) {
+          const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [req.user.id, tag]);
+          await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2)', [req.params.id, tagRow.rows[0].id]);
+        }
+      }
+      if (!fields.length && !Object.prototype.hasOwnProperty.call(req.body, 'tags')) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: '没有可更新字段' });
+      }
+      await client.query('COMMIT');
+      const hydrated = await assetQuery(req.params.id, req.user.id);
+      res.json({ asset: await hydrateAsset(hydrated) });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+function publicMusicTrack(row) {
+  const linkedAssets = Array.isArray(row.linked_assets) ? row.linked_assets : [];
+  return {
+    id: row.id,
+    name: row.name,
+    title: row.title || '',
+    artist: row.artist || '',
+    note: row.note || '',
+    status: row.status || '待标记',
+    streamUrl: `/api/music-tracks/${row.id}/stream`,
+    contentType: row.content_type || 'audio/wav',
+    size: formatBytes(Number(row.size_bytes)),
+    sizeBytes: Number(row.size_bytes || 0),
+    sha256: row.sha256,
+    durationSeconds: row.duration_seconds ? Number(row.duration_seconds) : null,
+    duration: row.duration_seconds ? formatDuration(row.duration_seconds) : '未知时长',
+    sampleRate: row.sample_rate || null,
+    channels: row.channels || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    linkedAssetCount: Number(row.linked_asset_count || linkedAssets.length || 0),
+    linkedAssets,
+  };
+}
+
+async function musicTrackQuery(trackId, userId) {
+  const { rows } = await pool.query(
+    `SELECT mt.*,
+        COUNT(a.id)::int AS linked_asset_count,
+        COALESCE(json_agg(json_build_object('id', a.id, 'name', a.name, 'type', a.type, 'folder', a.folder)
+          ORDER BY a.created_at DESC) FILTER (WHERE a.id IS NOT NULL), '[]'::json) AS linked_assets
+       FROM music_tracks mt
+       LEFT JOIN asset_music am ON am.music_track_id=mt.id
+       LEFT JOIN assets a ON a.id=am.asset_id AND a.deleted_at IS NULL
+      WHERE mt.id=$1 AND mt.user_id=$2
+      GROUP BY mt.id`,
+    [trackId, userId],
+  );
+  return rows[0];
+}
+
+app.post('/api/music-tracks', requireUser, upload.single('file'), async (req, res, next) => {
+  let tempPath = req.file && req.file.path;
+  let uploadedKey = '';
+  try {
+    if (!req.file) return res.status(400).json({ error: '请选择已在本地提取的音频文件' });
+    if (!String(req.file.mimetype || '').startsWith('audio/')) return res.status(415).json({ error: '音乐库只接受音频文件' });
+    const sha256 = String(req.body.sha256 || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(sha256)) return res.status(400).json({ error: 'sha256 无效' });
+    const durationSeconds = Number.parseFloat(String(req.body.durationSeconds || ''));
+    const sampleRate = Number.parseInt(String(req.body.sampleRate || ''), 10) || null;
+    const channels = Number.parseInt(String(req.body.channels || ''), 10) || null;
+    let assetIds = [];
+    try { assetIds = JSON.parse(String(req.body.assetIds || '[]')); } catch (_) {}
+    if (!Array.isArray(assetIds)) return res.status(400).json({ error: 'assetIds 必须是数组' });
+    assetIds = [...new Set(assetIds.map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 500);
+    if (assetIds.length) {
+      const owned = await pool.query(
+        `SELECT id FROM assets WHERE user_id=$1 AND type='video' AND deleted_at IS NULL AND id = ANY($2::uuid[])`,
+        [req.user.id, assetIds],
+      );
+      if (owned.rows.length !== assetIds.length) return res.status(400).json({ error: '存在不属于当前账号的视频素材' });
+    }
+    let track = (await pool.query('SELECT * FROM music_tracks WHERE user_id=$1 AND sha256=$2', [req.user.id, sha256])).rows[0];
+    if (!track) {
+      uploadedKey = `${req.user.id}/music/${sha256}.wav`;
+      await putObject(uploadedKey, tempPath, 'audio/wav');
+      const inserted = await pool.query(
+        `INSERT INTO music_tracks(user_id,name,status,object_key,content_type,size_bytes,sha256,duration_seconds,sample_rate,channels)
+         VALUES($1,'待标记音乐','待标记',$2,'audio/wav',$3,$4,$5,$6,$7)
+         ON CONFLICT(user_id,sha256) DO NOTHING RETURNING *`,
+        [req.user.id, uploadedKey, req.file.size, sha256, Number.isFinite(durationSeconds) ? durationSeconds : null, sampleRate, channels],
+      );
+      track = inserted.rows[0] || (await pool.query('SELECT * FROM music_tracks WHERE user_id=$1 AND sha256=$2', [req.user.id, sha256])).rows[0];
+    }
+    for (const assetId of assetIds) {
+      await pool.query(
+        `INSERT INTO asset_music(asset_id,music_track_id,source_audio_sha256) VALUES($1,$2,$3)
+         ON CONFLICT(asset_id) DO UPDATE SET music_track_id=EXCLUDED.music_track_id, source_audio_sha256=EXCLUDED.source_audio_sha256`,
+        [assetId, track.id, sha256],
+      );
+      await pool.query(
+        `UPDATE assets SET music_title=$1, music_artist=$2, music_status=$3, music_source='音乐库', music_evidence=$4
+          WHERE id=$5 AND user_id=$6 AND music_status=''`,
+        [track.title || '', track.artist || '', track.status || '待标记', track.note || '音轨已在本地提取并归档到音乐库，可人工标记曲名。', assetId, req.user.id],
+      );
+    }
+    const hydrated = await musicTrackQuery(track.id, req.user.id);
+    res.status(201).json({ track: publicMusicTrack(hydrated), reused: Boolean(track && !uploadedKey) });
+  } catch (error) {
+    if (uploadedKey) await deleteObject(uploadedKey).catch(() => {});
+    next(error);
+  } finally {
+    if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.post('/api/music-tracks/consolidate', requireUser, async (req, res, next) => {
+  try {
+    const groups = Array.isArray(req.body?.groups) ? req.body.groups : [];
+    if (!groups.length || groups.length > 500) return res.status(400).json({ error: 'groups 必须是 1 到 500 项' });
+    const merged = [];
+    const deletedKeys = [];
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const group of groups) {
+        const keepTrackId = String(group.keepTrackId || '').trim();
+        const duplicateTrackIds = [...new Set((Array.isArray(group.duplicateTrackIds) ? group.duplicateTrackIds : []).map((value) => String(value || '').trim()).filter((value) => value && value !== keepTrackId))];
+        if (!keepTrackId || !duplicateTrackIds.length) continue;
+        const ids = [keepTrackId, ...duplicateTrackIds];
+        const { rows } = await client.query('SELECT * FROM music_tracks WHERE user_id=$1 AND id = ANY($2::uuid[]) FOR UPDATE', [req.user.id, ids]);
+        if (rows.length !== ids.length) throw new Error('音乐合并列表中存在不存在或不属于当前账号的曲目');
+        const keep = rows.find((row) => row.id === keepTrackId);
+        const labeled = rows.find((row) => row.id !== keepTrackId && (row.title || row.artist || row.note || row.status !== '待标记'));
+        if (labeled && (!keep.title && !keep.artist && !keep.note && keep.status === '待标记')) {
+          await client.query(
+            `UPDATE music_tracks SET title=$1, artist=$2, note=$3, status=$4, updated_at=now() WHERE id=$5 AND user_id=$6`,
+            [labeled.title, labeled.artist, labeled.note, labeled.status, keepTrackId, req.user.id],
+          );
+        }
+        await client.query('UPDATE asset_music SET music_track_id=$1 WHERE music_track_id = ANY($2::uuid[])', [keepTrackId, duplicateTrackIds]);
+        const deleted = await client.query('DELETE FROM music_tracks WHERE user_id=$1 AND id = ANY($2::uuid[]) RETURNING id, object_key', [req.user.id, duplicateTrackIds]);
+        deletedKeys.push(...deleted.rows.map((row) => row.object_key));
+        merged.push({ keepTrackId, duplicateTrackIds: deleted.rows.map((row) => row.id), movedAssets: 0 });
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    await Promise.all(deletedKeys.map((key) => deleteObject(key).catch((error) => console.warn('Duplicate music cleanup skipped:', error.message))));
+    res.json({ mergedGroups: merged.length, deletedTracks: deletedKeys.length, groups: merged });
+  } catch (error) {
+    if (error.message === '音乐合并列表中存在不存在或不属于当前账号的曲目') return res.status(400).json({ error: error.message });
+    next(error);
+  }
+});
+
+app.get('/api/music-tracks', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT mt.*,
+          COUNT(a.id)::int AS linked_asset_count,
+          COALESCE(json_agg(json_build_object('id', a.id, 'name', a.name, 'type', a.type, 'folder', a.folder)
+            ORDER BY a.created_at DESC) FILTER (WHERE a.id IS NOT NULL), '[]'::json) AS linked_assets
+         FROM music_tracks mt
+         LEFT JOIN asset_music am ON am.music_track_id=mt.id
+         LEFT JOIN assets a ON a.id=am.asset_id AND a.deleted_at IS NULL
+        WHERE mt.user_id=$1
+        GROUP BY mt.id
+        ORDER BY CASE WHEN mt.status='待标记' THEN 0 ELSE 1 END, mt.updated_at DESC`,
+      [req.user.id],
+    );
+    res.json({ tracks: rows.map(publicMusicTrack) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/music-tracks/build', requireUser, async (req, res, next) => {
+  res.status(410).json({ error: '音频解析必须在本地执行，请运行 aigc-asset-organize 的 music-library --build --confirm 命令后上传结果。', code: 'LOCAL_BUILD_REQUIRED' });
+});
+
+app.patch('/api/music-tracks/:id', requireUser, async (req, res, next) => {
+  try {
+    const allowed = {
+      name: (value) => String(value || '').trim().slice(0, 200),
+      title: (value) => String(value || '').trim().slice(0, 200),
+      artist: (value) => String(value || '').trim().slice(0, 200),
+      note: (value) => String(value || '').trim().slice(0, 1000),
+      status: (value) => String(value || '').trim(),
+    };
+    const fields = [];
+    const values = [];
+    for (const [key, normalise] of Object.entries(allowed)) {
+      if (!Object.prototype.hasOwnProperty.call(req.body, key)) continue;
+      const value = normalise(req.body[key]);
+      if (key === 'status' && !['待标记', '已标记', '已确认', '不使用'].includes(value)) return res.status(400).json({ error: '音乐状态无效' });
+      values.push(value);
+      fields.push(`${key}=$${values.length}`);
+    }
+    if (!fields.length) return res.status(400).json({ error: '没有可更新字段' });
+    fields.push('updated_at=now()');
+    values.push(req.params.id, req.user.id);
+    const { rows } = await pool.query(
+      `UPDATE music_tracks SET ${fields.join(', ')} WHERE id=$${values.length - 1} AND user_id=$${values.length} RETURNING id`,
+      values,
+    );
+    if (!rows[0]) return res.status(404).json({ error: '音乐不存在' });
+    await pool.query(
+      `UPDATE assets a SET music_title=mt.title, music_artist=mt.artist, music_status=mt.status,
+          music_source='音乐库', music_evidence=CASE WHEN mt.note <> '' THEN mt.note ELSE '已在音乐库人工标记。' END
+         FROM asset_music am JOIN music_tracks mt ON mt.id=am.music_track_id
+        WHERE am.asset_id=a.id AND am.music_track_id=$1 AND a.user_id=$2 AND a.deleted_at IS NULL`,
+      [req.params.id, req.user.id],
+    );
+    const track = await musicTrackQuery(req.params.id, req.user.id);
+    res.json({ track: publicMusicTrack(track) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/music-tracks/:id/stream', requireUser, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM music_tracks WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+    const row = rows[0];
+    if (!row) return res.status(404).json({ error: '音乐不存在' });
+    const metadata = await headObject(row.object_key);
+    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    const range = req.headers.range;
+    let start = 0;
+    let end = Math.max(0, total - 1);
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match || (!match[1] && !match[2])) return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      if (match[1]) start = Number(match[1]);
+      if (match[2]) end = Number(match[2]);
+      else end = Math.min(total - 1, start + 4 * 1024 * 1024 - 1);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= total || end < start) return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      end = Math.min(end, total - 1);
+    }
+    const length = end - start + 1;
+    res.status(range ? 206 : 200).set({
+      'Content-Type': row.content_type || 'audio/wav',
+      'Content-Length': String(length),
+      'Accept-Ranges': 'bytes',
+      'Content-Disposition': 'inline',
+      ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
+    });
+    cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Headers: range ? { Range: `bytes=${start}-${end}` } : {}, Output: res }, (error) => {
+      if (error && !res.headersSent) next(error);
+    });
   } catch (error) {
     next(error);
   }
