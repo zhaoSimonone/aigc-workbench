@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS assets (
   duration_seconds NUMERIC,
   folder TEXT NOT NULL DEFAULT '灵感收集',
   note TEXT NOT NULL DEFAULT '',
+  music_title TEXT NOT NULL DEFAULT '',
+  music_artist TEXT NOT NULL DEFAULT '',
+  music_source TEXT NOT NULL DEFAULT '',
+  music_status TEXT NOT NULL DEFAULT '',
+  music_confidence TEXT NOT NULL DEFAULT '',
+  music_evidence TEXT NOT NULL DEFAULT '',
   favorite BOOLEAN NOT NULL DEFAULT false,
   used BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -49,10 +55,45 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_category TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_title TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_artist TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_confidence TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_evidence TEXT NOT NULL DEFAULT '';
 UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
 CREATE INDEX IF NOT EXISTS assets_user_sha256_idx ON assets(user_id, sha256) WHERE sha256 IS NOT NULL AND deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS music_tracks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '待标记音乐',
+  title TEXT NOT NULL DEFAULT '',
+  artist TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '待标记' CHECK (status IN ('待标记', '已标记', '已确认', '不使用')),
+  object_key TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'audio/wav',
+  size_bytes BIGINT NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL,
+  duration_seconds NUMERIC,
+  sample_rate INTEGER,
+  channels INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS music_tracks_user_updated_idx ON music_tracks(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS asset_music (
+  asset_id UUID PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+  music_track_id UUID NOT NULL REFERENCES music_tracks(id) ON DELETE CASCADE,
+  source_audio_sha256 TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS asset_music_track_idx ON asset_music(music_track_id);
 
 CREATE TABLE IF NOT EXISTS character_albums (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AIGC 素材整理"
+  short_description: "按画面和声音整理标题、标签与音乐"
+  default_prompt: "使用 $aigc-asset-organize 整理灵感收集中的素材，并在写回前展示 diff。"

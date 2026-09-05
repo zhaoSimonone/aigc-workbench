@@ -29,6 +29,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  Music2,
   MoreHorizontal,
   Pencil,
   Play,
@@ -229,6 +230,12 @@ function normaliseAsset(asset) {
     createdAt: asset.date,
     tags: Array.isArray(asset.tags) ? asset.tags : [],
     characterCategory: asset.characterCategory || "",
+    musicTitle: asset.musicTitle || "",
+    musicArtist: asset.musicArtist || "",
+    musicSource: asset.musicSource || "",
+    musicStatus: asset.musicStatus || "",
+    musicConfidence: asset.musicConfidence || "",
+    musicEvidence: asset.musicEvidence || "",
     parentAssetIds: Array.isArray(asset.parentAssetIds) ? asset.parentAssetIds : [],
     derivedAssetIds: Array.isArray(asset.derivedAssetIds) ? asset.derivedAssetIds : [],
   };
@@ -425,9 +432,12 @@ function Workspace({ user, onLogout }) {
   const [characterAlbums, setCharacterAlbums] = useState([]);
   const [videoAccounts, setVideoAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
+  const [musicTracks, setMusicTracks] = useState([]);
   const [loadingAssets, setLoadingAssets] = useState(true);
   const [loadingVideoAccounts, setLoadingVideoAccounts] = useState(true);
   const [loadingPrompts, setLoadingPrompts] = useState(true);
+  const [loadingMusicTracks, setLoadingMusicTracks] = useState(true);
+  const [buildingMusic, setBuildingMusic] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [activeFolder, setActiveFolder] = useState("全部素材");
@@ -447,6 +457,7 @@ function Workspace({ user, onLogout }) {
   const [editingPrompt, setEditingPrompt] = useState(null);
   const [copiedPromptId, setCopiedPromptId] = useState("");
   const [editingAsset, setEditingAsset] = useState(null);
+  const [editingMusicTrack, setEditingMusicTrack] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [sort, setSort] = useState("最近添加");
@@ -455,18 +466,26 @@ function Workspace({ user, onLogout }) {
   const folderInput = useRef(null);
 
   useEffect(() => {
-    Promise.all([apiFetch("/assets"), apiFetch("/character-albums"), apiFetch("/video-accounts"), apiFetch("/prompts")])
-      .then(([assetPayload, albumPayload, accountPayload, promptPayload]) => {
+    Promise.all([
+      apiFetch("/assets"),
+      apiFetch("/character-albums"),
+      apiFetch("/video-accounts"),
+      apiFetch("/prompts"),
+      apiFetch("/music-tracks").catch(() => ({ tracks: [] })),
+    ])
+      .then(([assetPayload, albumPayload, accountPayload, promptPayload, musicPayload]) => {
         setAssets((assetPayload.assets || []).map(normaliseAsset));
         setCharacterAlbums(albumPayload.albums || []);
         setVideoAccounts(accountPayload.accounts || []);
         setPrompts(promptPayload.prompts || []);
+        setMusicTracks(musicPayload.tracks || []);
       })
       .catch((error) => setLoadError(error.message))
       .finally(() => {
         setLoadingAssets(false);
         setLoadingVideoAccounts(false);
         setLoadingPrompts(false);
+        setLoadingMusicTracks(false);
       });
   }, []);
   const folderItems = useMemo(
@@ -494,8 +513,9 @@ function Workspace({ user, onLogout }) {
       },
       { label: "提示词库", count: prompts.length, icon: FileText },
       { label: "视频账号", count: videoAccounts.length, icon: Users },
+      { label: "音乐库", count: musicTracks.length, icon: Music2 },
     ],
-    [assets, prompts, videoAccounts],
+    [assets, prompts, videoAccounts, musicTracks],
   );
   const filteredAssets = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -518,7 +538,7 @@ function Workspace({ user, onLogout }) {
       const inTag = !activeTag || asset.tags.includes(activeTag);
       const inSearch =
         !normalized ||
-        `${asset.name} ${asset.source} ${asset.tags.join(" ")}`
+        `${asset.name} ${asset.source} ${asset.tags.join(" ")} ${asset.musicTitle || ""} ${asset.musicArtist || ""} ${asset.musicStatus || ""}`
           .toLowerCase()
           .includes(normalized);
       return inFolder && inCharacter && inCharacterCategory && inType && inTag && inSearch;
@@ -732,6 +752,18 @@ function Workspace({ user, onLogout }) {
       setLoadError(error.message);
     }
   };
+  const buildMusicLibrary = () => {
+    setLoadError("音频解析需在本地执行：python3 skills/aigc-asset-organize/scripts/organize_assets.py music-library --build --confirm --json");
+  };
+  const saveMusicTrack = async (id, fields) => {
+    try {
+      const payload = await apiFetch(`/music-tracks/${id}`, { method: "PATCH", body: JSON.stringify(fields) });
+      setMusicTracks((items) => items.map((item) => (item.id === id ? payload.track : item)));
+      setEditingMusicTrack(null);
+    } catch (error) {
+      setLoadError(error.message);
+    }
+  };
   const copyPrompt = async (prompt) => {
     try {
       await navigator.clipboard.writeText(prompt.content);
@@ -791,6 +823,7 @@ function Workspace({ user, onLogout }) {
   const isRoleAlbumView = activeFolder === "角色设定" && !activeCharacter;
   const isPromptView = activeFolder === "提示词库";
   const isVideoAccountView = activeFolder === "视频账号";
+  const isMusicView = activeFolder === "音乐库";
   const displayStats = isPromptView ? promptStats : stats;
   const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
     ? activeFolder
@@ -975,8 +1008,8 @@ function Workspace({ user, onLogout }) {
               <p className="eyebrow">
                 MONDAY, AUG 31 <span className="eyebrow-dot" /> 09:46
               </p>
-              <h1>{isPromptView ? "提示词库" : "素材库"}</h1>
-              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : "把灵感收好，下一条作品会更快开始。"}</p>
+              <h1>{isPromptView ? "提示词库" : isMusicView ? "音乐库" : "素材库"}</h1>
+              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : "把灵感收好，下一条作品会更快开始。"}</p>
             </div>
             <div className="intro-actions">
               {isPromptView ? (
@@ -988,6 +1021,11 @@ function Workspace({ user, onLogout }) {
                 <button className="primary-button" onClick={() => setShowVideoAccountModal(true)}>
                   <Plus size={18} />
                   收藏视频账号
+                </button>
+              ) : isMusicView ? (
+                <button className="primary-button" onClick={buildMusicLibrary} disabled={buildingMusic}>
+                  <Music2 size={17} />
+                  在本地整理音乐
                 </button>
               ) : (
                 <>
@@ -1051,6 +1089,8 @@ function Workspace({ user, onLogout }) {
                       ? `${prompts.length} 条提示词`
                       : isVideoAccountView
                       ? `${videoAccounts.length} 个账号`
+                      : isMusicView
+                      ? `${musicTracks.length} 首音乐`
                       : isRoleAlbumView
                       ? `${roleAlbums.length} 个角色`
                       : filteredAssets.length !== assets.length
@@ -1064,7 +1104,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1098,6 +1138,14 @@ function Workspace({ user, onLogout }) {
               onCreate={() => setShowVideoAccountModal(true)}
               onEdit={(account) => setEditingVideoAccount(account)}
               onDelete={deleteVideoAccount}
+            />
+          ) : isMusicView ? (
+            <MusicLibraryPanel
+              tracks={musicTracks}
+              loading={loadingMusicTracks}
+              onBuild={buildMusicLibrary}
+              building={buildingMusic}
+              onEdit={(track) => setEditingMusicTrack(track)}
             />
           ) : (
             <>
@@ -1370,6 +1418,119 @@ function Workspace({ user, onLogout }) {
           onReplace={(file) => replaceAssetFile(editingAsset.id, file)}
         />
       )}
+      {editingMusicTrack && (
+        <MusicTrackModal
+          key={editingMusicTrack.id}
+          track={editingMusicTrack}
+          onClose={() => setEditingMusicTrack(null)}
+          onSave={(fields) => saveMusicTrack(editingMusicTrack.id, fields)}
+        />
+      )}
+    </div>
+  );
+}
+
+function MusicLibraryPanel({ tracks, loading, onBuild, building, onEdit }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const filteredTracks = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return tracks.filter((track) => {
+      const matchesStatus = !status || track.status === status;
+      const linked = (track.linkedAssets || []).map((asset) => asset.name).join(" ");
+      const matchesQuery = !normalized || `${track.name} ${track.title} ${track.artist} ${track.note} ${linked}`.toLowerCase().includes(normalized);
+      return matchesStatus && matchesQuery;
+    });
+  }, [query, status, tracks]);
+  if (loading) return <div className="empty-state"><div className="empty-icon"><Music2 size={22} /></div><h3>正在加载音乐库</h3><p>读取已提取的音轨与来源视频</p></div>;
+  return (
+    <div className="music-library-panel">
+      <div className="music-toolbar">
+        <div className="search-box">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索曲名、艺人或来源视频" />
+        </div>
+        <div className="music-status-tabs">
+          {["", "待标记", "已标记", "已确认", "不使用"].map((value) => (
+            <button key={value || "all"} className={status === value ? "active" : ""} onClick={() => setStatus(value)}>
+              {value || "全部"}
+            </button>
+          ))}
+        </div>
+        <button className="secondary-button" onClick={onBuild} disabled={building}>
+          <Music2 size={15} />本地整理音乐
+        </button>
+      </div>
+      {filteredTracks.length ? (
+        <div className="music-track-list">
+          {filteredTracks.map((track) => (
+            <article className="music-track-row" key={track.id}>
+              <div className="music-track-icon"><Music2 size={18} /></div>
+              <div className="music-track-main">
+                <div className="music-track-heading">
+                  <strong>{track.title || track.name || "待标记音乐"}</strong>
+                  <span className={`music-status music-status-${track.status === "待标记" ? "pending" : track.status === "不使用" ? "muted" : "ok"}`}>{track.status}</span>
+                </div>
+                <div className="music-track-meta">
+                  <span>{track.artist || "艺人待标记"}</span><i />
+                  <span>{track.duration}</span><i />
+                  <span>{track.linkedAssetCount} 个来源视频</span>
+                </div>
+                {track.linkedAssets?.length > 0 && <p className="music-track-sources">来源：{track.linkedAssets.slice(0, 3).map((asset) => asset.name).join("、")}{track.linkedAssets.length > 3 ? ` 等 ${track.linkedAssets.length} 个` : ""}</p>}
+                {track.note && <p className="music-track-note">{track.note}</p>}
+                <audio controls preload="none" src={track.streamUrl} />
+              </div>
+              <button className="icon-button music-edit-button" onClick={() => onEdit(track)} aria-label={`编辑${track.title || track.name}`} title="人工标记音乐">
+                <Pencil size={16} />
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state music-empty-state">
+          <div className="empty-icon"><Music2 size={22} /></div>
+          <h3>{tracks.length ? "没有匹配的音乐" : "还没有音乐库"}</h3>
+          <p>{tracks.length ? "换一个搜索词或状态筛选。" : "请在本地运行 skill 提取全部视频音轨，完成后刷新此页。"}</p>
+          {!tracks.length && <button className="primary-button" onClick={onBuild} disabled={building}><Music2 size={16} />在本地整理音乐</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MusicTrackModal({ track, onClose, onSave }) {
+  const [name, setName] = useState(track.name || "");
+  const [title, setTitle] = useState(track.title || "");
+  const [artist, setArtist] = useState(track.artist || "");
+  const [status, setStatus] = useState(track.status || "待标记");
+  const [note, setNote] = useState(track.note || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({ name: name.trim() || "待标记音乐", title: title.trim(), artist: artist.trim(), status, note: note.trim() });
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal-layer" onClick={onClose}>
+      <form className="upload-modal music-track-modal" onSubmit={submit} onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head"><div><span className="modal-eyebrow">音乐库</span><h2>人工标记音乐</h2></div><button type="button" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>
+        <p className="music-track-hash">SHA-256：{track.sha256}</p>
+        <label>库内名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 粉色+艾米莉亚换装配乐" /></label>
+        <label>曲名<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="不知道可留空" /></label>
+        <label>艺人<input value={artist} onChange={(event) => setArtist(event.target.value)} placeholder="不知道可留空" /></label>
+        <label>状态<select value={status} onChange={(event) => setStatus(event.target.value)}>{["待标记", "已标记", "已确认", "不使用"].map((value) => <option key={value}>{value}</option>)}</select></label>
+        <label>备注<textarea value={note} onChange={(event) => setNote(event.target.value)} rows="3" placeholder="记录识别来源、剪辑用途或版本信息" /></label>
+        {error && <div className="inline-error">{error}</div>}
+        <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}><Check size={15} />{saving ? "保存中" : "保存标记"}</button></div>
+      </form>
     </div>
   );
 }
@@ -2079,6 +2240,18 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
             </div>
             <p>{asset.note}</p>
           </div>
+          {asset.type === "video" && (asset.musicStatus || asset.musicTitle || asset.musicEvidence) && (
+            <div className="detail-note">
+              <div className="note-label"><Music2 size={14} />音乐整理</div>
+              <p>
+                {asset.musicStatus === "已识别" && asset.musicTitle
+                  ? `${asset.musicTitle}${asset.musicArtist ? ` · ${asset.musicArtist}` : ""}`
+                  : asset.musicStatus || "待确认"}
+                {asset.musicConfidence ? `（置信度：${asset.musicConfidence}）` : ""}
+              </p>
+              {asset.musicEvidence && <small>{asset.musicEvidence}</small>}
+            </div>
+          )}
           {isCreation && (
             <div className="comments-section">
               <div className="comments-heading">
