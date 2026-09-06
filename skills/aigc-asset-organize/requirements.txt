@@ -1,1 +1,1 @@
-shazamio
+requests>=2.28

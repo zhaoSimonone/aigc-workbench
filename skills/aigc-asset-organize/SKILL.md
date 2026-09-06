@@ -46,7 +46,9 @@ description: Analyze and organize AIGC Shelf assets by real visual/audio content
 python3 /path/to/skills/aigc-asset-organize/scripts/recognize_music.py "/path/to/video.mp4" --pretty
 ```
 
-CLI 默认输出单个 JSON；将 `success=true` 的 `title`、`artist`、`shazam_url`、`segment_start` 和 `attempts` 作为识别证据，仍需结合画面/来源判断置信度后再生成整理提案。识别失败时保留 `musicStatus=待确认`，不要猜测曲名。视频下载、音频抽取和临时文件处理都在本地完成；ShazamIO 只接收抽取出的短音频片段，AIGC Shelf 服务器不解析视频。
+识别后端为 ACRCloud（项目名称 `music_identify`，host 默认 `identify-cn-north-1.acrcloud.cn`）。脚本只接受环境变量 `ACRCLOUD_HOST`、`ACRCLOUD_ACCESS_KEY`、`ACRCLOUD_SECRET_KEY`，不要把密钥写入命令行参数、Skill、README、日志或 Git；用户已在会话中提供真实凭证时由 Agent 在当前 shell 设置环境变量后执行，且最终回复不得回显密钥。
+
+CLI 默认输出单个 JSON；将 `success=true` 的 `title`、`artist`、`acrcloud_id`、`score`、`segment_start` 和 `attempts` 作为识别证据，仍需结合画面/来源判断置信度后再生成整理提案。识别失败时保留 `musicStatus=待确认`，不要猜测曲名。视频下载、音频抽取和临时文件处理都在本地完成；ACRCloud 只接收抽取出的短音频片段，AIGC Shelf 服务器不下载视频、不解析音频。脚本只使用 ACRCloud，不接入 AudD、ShazamIO 或其他第三方付费服务。
 
 ### 音乐库构建
 
