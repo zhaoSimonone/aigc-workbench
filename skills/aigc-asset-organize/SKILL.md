@@ -50,6 +50,8 @@ python3 /path/to/skills/aigc-asset-organize/scripts/recognize_music.py "/path/to
 
 CLI 默认输出单个 JSON；将 `success=true` 的 `title`、`artist`、`acrcloud_id`、`score`、`segment_start` 和 `attempts` 作为识别证据，仍需结合画面/来源判断置信度后再生成整理提案。识别失败时保留 `musicStatus=待确认`，不要猜测曲名。视频下载、音频抽取和临时文件处理都在本地完成；ACRCloud 只接收抽取出的短音频片段，AIGC Shelf 服务器不下载视频、不解析音频。脚本只使用 ACRCloud，不接入 AudD、ShazamIO 或其他第三方付费服务。
 
+如果 Python DNS 在当前 macOS 环境中无法解析 ACRCloud、但系统 `curl` 可联网，CLI 会自动通过 `curl` 重试；密钥仅经标准输入传入该请求，不会出现在命令行、日志或文件中。
+
 ### 音乐库构建
 
 当用户要求“把所有视频的音乐提取出来”“构建音乐库”或“去重音频”时，使用服务端的音乐库流程，而不是猜测歌名：

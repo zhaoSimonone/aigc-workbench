@@ -31,3 +31,5 @@ python3 scripts/recognize_music.py "/path/to/video.mp4" --pretty
 ```
 
 音乐识别和音乐库音频提取都在本地完成。服务器只保存素材、音频对象和关系元数据；本地 FFmpeg 先把视频/音频切成短片段，再只把片段发送到 ACRCloud 识别。识别功能需要网络和 ACRCloud 项目凭证，不是完全离线方案。完整的字段规则、diff 写回约束和音乐识别说明见 [SKILL.md](SKILL.md) 与 [references/music-recognition.md](references/music-recognition.md)。
+
+识别优先通过 Python `requests` 发起；若 Python DNS 解析异常而系统 `curl` 仍能联网，会自动以 `curl` 重试，凭证只通过标准输入传递。
