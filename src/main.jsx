@@ -465,6 +465,12 @@ function Workspace({ user, onLogout }) {
   const fileInput = useRef(null);
   const folderInput = useRef(null);
 
+  const refreshMusicTracks = () => {
+    apiFetch("/music-tracks")
+      .then((payload) => setMusicTracks(payload.tracks || []))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     Promise.all([
       apiFetch("/assets"),
@@ -488,6 +494,19 @@ function Workspace({ user, onLogout }) {
         setLoadingMusicTracks(false);
       });
   }, []);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshMusicTracks();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, []);
+
   const folderItems = useMemo(
     () => [
       { label: "全部素材", count: assets.length, icon: LayoutGrid },
