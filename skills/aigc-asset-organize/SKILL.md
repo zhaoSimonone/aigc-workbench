@@ -38,6 +38,16 @@ description: Analyze and organize AIGC Shelf assets by real visual/audio content
 - 为便于统一剪辑，优先使用音乐结构化字段检索；不要为了音乐无限增加标签。只有音乐是素材的明确特色且仍不超过 5 个标签时，才加入一个 `音乐` 或 `音乐待识别` 标签，不再使用 `音乐·曲名` 这类额外标签。不要删除原有仍然准确的特色标签。
 - 无音轨、只有人声或无法听清时，记录 `musicStatus=无音乐/无法判断` 及原因，而不是把人声当成歌曲。
 
+### 本地歌曲识别
+
+当用户要求识别某个本地视频/音频的歌曲，或对已下载的素材执行“音乐识别”时，读取 [references/music-recognition.md](references/music-recognition.md)，再运行本地 CLI：
+
+```bash
+python3 /path/to/skills/aigc-asset-organize/scripts/recognize_music.py "/path/to/video.mp4" --pretty
+```
+
+CLI 默认输出单个 JSON；将 `success=true` 的 `title`、`artist`、`shazam_url`、`segment_start` 和 `attempts` 作为识别证据，仍需结合画面/来源判断置信度后再生成整理提案。识别失败时保留 `musicStatus=待确认`，不要猜测曲名。视频下载、音频抽取和临时文件处理都在本地完成；ShazamIO 只接收抽取出的短音频片段，AIGC Shelf 服务器不解析视频。
+
 ### 音乐库构建
 
 当用户要求“把所有视频的音乐提取出来”“构建音乐库”或“去重音频”时，使用服务端的音乐库流程，而不是猜测歌名：
@@ -58,13 +68,13 @@ python3 /path/to/skills/aigc-asset-organize/scripts/organize_assets.py music-lib
 
 没有可提取音轨的视频会计入“无音乐/无法判断”，失败项会单独列出原因；不会因为无法识别歌名而伪造标签或艺人。
 
-`--dedupe-content` 是独立的本地内容去重步骤：它下载音乐库中的 WAV，在本地计算短时频谱指纹，并用时间偏移对齐来匹配同一首音乐的不同截取片段、起止点和轻微编码差异。自动合并要求持续重叠片段至少 5 秒，平均相似度至少 0.97 且最差四分位相似度至少 0.95，并采用全组一致（complete-link）聚类，避免一条边缘相似记录把不同音乐串成大组。它先输出待合并组和相似度，不带 `--confirm` 不会删除关系或音频对象；确认后使用：
+`--dedupe-content` 是独立的本地内容去重步骤：它下载音乐库中的 WAV，在本地计算短时频谱指纹，并用时间偏移对齐来匹配同一首音乐的不同截取片段、起止点和轻微编码差异。自动合并要求持续重叠片段至少 5 秒，平均相似度至少 0.97 且最差四分位相似度至少 0.95，并采用全组一致（complete-link）聚类，避免一条边缘相似记录把不同音乐串成大组。自动合并时优先保留音频时长更长的记录，时长相同再考虑人工标记状态和来源数量。相似度达到 0.94 但未达到自动合并阈值的记录会输出为 `reviewCandidates` 人工复核候选，不会自动删除。它先输出待合并组和相似度，不带 `--confirm` 不会删除关系或音频对象；确认后使用：
 
 ```bash
 python3 /path/to/skills/aigc-asset-organize/scripts/organize_assets.py music-library --dedupe-content --confirm --json
 ```
 
-去重不是仅按时长、文件名或文件 SHA-256 合并；相似但未达到高置信度阈值的记录会保留，供人工试听确认。合并会保留所有来源视频；若重复记录中已有人工标记，优先保留到幸存曲目。
+去重不是仅按时长、文件名或文件 SHA-256 合并；相似但未达到高置信度阈值的记录会保留，供人工试听确认。合并会保留所有来源视频；若重复记录中已有人工标记，只有在时长相同的情况下才用于选择幸存曲目。
 
 ## 提案、diff 与写回
 

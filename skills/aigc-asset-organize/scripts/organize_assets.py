@@ -574,11 +574,29 @@ def is_high_confidence_music_match(similarity):
     )
 
 
+def is_review_music_match(similarity):
+    """Flag near matches that may be the same song with a different mix."""
+    return (
+        similarity.get("score", 0.0) >= 0.94
+        and similarity.get("p25", 0.0) >= 0.90
+        and similarity.get("overlapSeconds", 0.0) >= 5.0
+        and not is_high_confidence_music_match(similarity)
+    )
+
+
+def track_duration_seconds(track):
+    try:
+        return float(track.get("durationSeconds") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def choose_music_survivor(tracks):
     status_rank = {"已确认": 3, "已标记": 2, "待标记": 1, "不使用": 0}
     return sorted(
         tracks,
         key=lambda track: (
+            track_duration_seconds(track),
             status_rank.get(track.get("status"), 0),
             bool(track.get("title") or track.get("artist") or track.get("note")),
             int(track.get("linkedAssetCount") or 0),
@@ -590,7 +608,7 @@ def choose_music_survivor(tracks):
 
 def local_content_dedupe(client):
     tracks = client.list_music_tracks()
-    result = {"tracksScanned": len(tracks), "groups": [], "errors": []}
+    result = {"tracksScanned": len(tracks), "groups": [], "reviewCandidates": [], "errors": []}
     if len(tracks) < 2:
         return result
     with tempfile.TemporaryDirectory(prefix="aigc-music-dedupe-") as temp_dir:
@@ -603,6 +621,7 @@ def local_content_dedupe(client):
             except Exception as error:
                 result["errors"].append({"trackId": track.get("id"), "error": str(error)[:500]})
         matches = []
+        review_matches = []
         ids = list(fingerprints)
         pair_matches = {}
         for left_index, left_id in enumerate(ids):
@@ -611,6 +630,8 @@ def local_content_dedupe(client):
                 pair_matches[frozenset((left_id, right_id))] = similarity
                 if is_high_confidence_music_match(similarity):
                     matches.append({"leftTrackId": left_id, "rightTrackId": right_id, **similarity})
+                elif is_review_music_match(similarity):
+                    review_matches.append({"leftTrackId": left_id, "rightTrackId": right_id, **similarity})
 
         # Complete-link clustering prevents a weak bridge from merging unrelated
         # songs just because each one resembles a different member of a cluster.
@@ -628,6 +649,14 @@ def local_content_dedupe(client):
             if not placed:
                 clusters.append([track_id])
         by_id = {track["id"]: track for track in tracks}
+        result["reviewCandidates"] = [
+            {
+                **match,
+                "leftSources": [asset.get("name") for asset in by_id[match["leftTrackId"]].get("linkedAssets") or []],
+                "rightSources": [asset.get("name") for asset in by_id[match["rightTrackId"]].get("linkedAssets") or []],
+            }
+            for match in sorted(review_matches, key=lambda item: (-item["score"], -item["overlapSeconds"]))
+        ]
         for track_ids in clusters:
             if len(track_ids) < 2:
                 continue
