@@ -37,6 +37,8 @@ python3 scripts/recognize_music.py "/path/to/audio.mp3" --pretty
 
 stdout 始终只输出一个 JSON 对象，方便 Agent 继续生成素材整理提案。输入不存在、没有音轨、媒体损坏、依赖缺失、凭证缺失、网络异常和无匹配都会返回 `success: false` 及结构化 `error`，不会把 Python traceback 写入 stdout。
 
+程序优先通过 Python `requests` 连接 ACRCloud。若当前 macOS 环境仅 Python DNS 解析异常、但系统 `curl` 能正常联网，会自动用 `curl` 重试同一请求。该降级请求的凭证通过标准输入传给 `curl`，不会写入磁盘、命令行参数或日志。
+
 ## 采样和重试
 
 - 15 秒以内的文件使用完整音频。

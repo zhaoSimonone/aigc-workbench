@@ -42,6 +42,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 import recognize_music  # noqa: E402  module name is intentionally non-PEP8 for CLI
 
 
+def ffmpeg_for_tests() -> str:
+    """Use the same Homebrew-aware binary lookup as the CLI under test."""
+    candidates = [shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError("ffmpeg not installed")
+
+
 # A minimal ACRCloud success payload modeled on the public documentation.
 SAMPLE_SUCCESS_PAYLOAD = {
     "status": {"msg": "Success", "version": "1.0", "code": 0},
@@ -266,7 +275,7 @@ class RecognizeFileFailureTests(unittest.TestCase):
                 video = Path(tmp) / "no_audio.mp4"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120",
                         "-c:v", "libx264", "-an", str(video),
                     ],
@@ -323,7 +332,7 @@ class RecognizeFileFailureTests(unittest.TestCase):
                 video = Path(tmp) / "long.mp4"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "testsrc=duration=30:size=160x120",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
                         "-c:v", "libx264", "-c:a", "aac", "-shortest", str(video),
@@ -380,7 +389,7 @@ class ACRCloudRequestTests(unittest.TestCase):
                 audio = Path(tmp) / "clip.wav"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
                         "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
                         str(audio),
@@ -438,14 +447,42 @@ class ACRCloudRequestTests(unittest.TestCase):
         )
         self.assertEqual(captured["data"]["signature"], expected_sig)
 
-    def test_request_error_is_reported(self):
+    def test_requests_network_error_uses_curl_fallback(self):
         try:
             import subprocess
             with tempfile.TemporaryDirectory() as tmp:
                 audio = Path(tmp) / "clip.wav"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                        "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+                        str(audio),
+                    ],
+                    check=True,
+                )
+                import requests as real_requests
+                with mock.patch("requests.post", side_effect=real_requests.exceptions.ConnectionError("DNS failed")):
+                    with mock.patch(
+                        "recognize_music.recognize_with_curl_fallback",
+                        return_value=SAMPLE_SUCCESS_PAYLOAD,
+                    ) as fallback:
+                        result = recognize_music.recognize_file(audio, timeout=5.0)
+        except FileNotFoundError:
+            self.skipTest("ffmpeg not installed")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["source"], "acrcloud")
+        fallback.assert_called_once()
+        self.assertEqual(fallback.call_args.kwargs["data"]["access_key"], "AK_TEST")
+
+    def test_request_error_is_reported_when_curl_fallback_fails(self):
+        try:
+            import subprocess
+            with tempfile.TemporaryDirectory() as tmp:
+                audio = Path(tmp) / "clip.wav"
+                subprocess.run(
+                    [
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
                         "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
                         str(audio),
@@ -454,11 +491,29 @@ class ACRCloudRequestTests(unittest.TestCase):
                 )
                 import requests as real_requests
                 with mock.patch("requests.post", side_effect=real_requests.exceptions.Timeout("boom")):
-                    result = recognize_music.recognize_file(audio, timeout=5.0)
+                    with mock.patch(
+                        "recognize_music.recognize_with_curl_fallback",
+                        side_effect=recognize_music.RecognitionFailure(
+                            "acrcloud_request_error", "curl connection failed"
+                        ),
+                    ):
+                        result = recognize_music.recognize_file(audio, timeout=5.0)
         except FileNotFoundError:
             self.skipTest("ffmpeg not installed")
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "acrcloud_request_error")
+
+    def test_curl_config_carries_credentials_only_in_stdin_config(self):
+        config = recognize_music.build_curl_config(
+            "https://example.test/v1/identify",
+            Path("/tmp/response.json"),
+            Path("/tmp/example clip.wav"),
+            {"access_key": "AK_TEST", "signature": "signature-value"},
+            timeout=5.0,
+        )
+        self.assertIn('form-string = "access_key=AK_TEST"', config)
+        self.assertIn('form-string = "signature=signature-value"', config)
+        self.assertIn('form = "sample=@/tmp/example clip.wav;type=application/octet-stream"', config)
 
     def test_no_match_returns_no_match(self):
         try:
@@ -467,7 +522,7 @@ class ACRCloudRequestTests(unittest.TestCase):
                 audio = Path(tmp) / "clip.wav"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
                         "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
                         str(audio),
@@ -491,7 +546,7 @@ class ACRCloudRequestTests(unittest.TestCase):
                 audio = Path(tmp) / "clip.wav"
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-v", "error",
+                        ffmpeg_for_tests(), "-y", "-v", "error",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
                         "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
                         str(audio),

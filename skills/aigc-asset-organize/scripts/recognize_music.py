@@ -257,6 +257,102 @@ def sign_request(access_secret: str, string_to_sign: str) -> str:
     return base64.b64encode(digest).decode("ascii")
 
 
+def curl_config_quote(value: str) -> str:
+    """Quote a value for curl's config-file syntax.
+
+    The fallback passes this config through stdin, so credentials stay out of
+    command arguments, process listings, and temporary files.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+
+
+def build_curl_config(
+    url: str,
+    response_path: Path,
+    audio_path: Path,
+    data: Dict[str, str],
+    timeout: float,
+) -> str:
+    """Build stdin-only curl configuration for one multipart request."""
+    safe_timeout = max(5.0, timeout)
+    connect_timeout = min(10.0, safe_timeout)
+    config_lines = [
+        f'url = "{curl_config_quote(url)}"',
+        'request = "POST"',
+        "silent",
+        "show-error",
+        f"connect-timeout = {connect_timeout:.3f}",
+        f"max-time = {safe_timeout:.3f}",
+    ]
+    for key, value in data.items():
+        config_lines.append(f'form-string = "{key}={curl_config_quote(value)}"')
+    config_lines.extend(
+        [
+            f'form = "sample=@{curl_config_quote(str(audio_path))};type=application/octet-stream"',
+            f'output = "{curl_config_quote(str(response_path))}"',
+            'write-out = "%{http_code}"',
+        ]
+    )
+    return "\n".join(config_lines) + "\n"
+
+
+def recognize_with_curl_fallback(
+    audio_path: Path,
+    *,
+    url: str,
+    data: Dict[str, str],
+    timeout: float,
+) -> Dict[str, Any]:
+    """Submit ACRCloud multipart data with curl when Python DNS is unusable."""
+    try:
+        curl_path = resolve_binary("curl")
+    except RecognitionFailure as error:
+        raise RecognitionFailure(
+            "acrcloud_request_error",
+            "ACRCloud request failed and the system curl fallback is unavailable.",
+        ) from error
+
+    with tempfile.TemporaryDirectory(prefix="aigc-acrcloud-response-") as temp_dir:
+        response_path = Path(temp_dir) / "response.json"
+        config = build_curl_config(url, response_path, audio_path, data, timeout)
+        try:
+            completed = subprocess.run(
+                [curl_path, "--config", "-"],
+                input=config,
+                text=True,
+                capture_output=True,
+                timeout=max(10.0, timeout + 5.0),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RecognitionFailure("acrcloud_request_error", "ACRCloud curl fallback timed out.") from error
+        except OSError as error:
+            raise RecognitionFailure(
+                "acrcloud_request_error",
+                f"ACRCloud curl fallback failed: {error.__class__.__name__}: {str(error)[:400]}",
+            ) from error
+
+        status = (completed.stdout or "").strip()
+        if completed.returncode != 0:
+            detail = (completed.stderr or "curl request failed").strip()
+            raise RecognitionFailure(
+                "acrcloud_request_error",
+                f"ACRCloud curl fallback failed (HTTP {status or 'unknown'}): {detail[:400]}",
+            )
+        try:
+            payload = json.loads(response_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RecognitionFailure(
+                "acrcloud_request_error",
+                f"ACRCloud curl fallback returned non-JSON response (HTTP {status or 'unknown'}).",
+            ) from error
+    if not isinstance(payload, dict):
+        raise RecognitionFailure(
+            "acrcloud_request_error",
+            f"ACRCloud curl fallback returned an unexpected JSON shape (HTTP {status or 'unknown'}).",
+        )
+    return payload
+
+
 def resolve_credentials(
     host_override: Optional[str],
     access_key_override: Optional[str],
@@ -307,15 +403,12 @@ def recognize_with_acrcloud(
     secret_key: str,
     timeout: float,
 ) -> Dict[str, Any]:
-    """Send audio to ACRCloud and return the parsed JSON response."""
-    try:
-        import requests  # imported lazily so credential errors surface first
-    except ImportError as error:  # pragma: no cover - exercised via tests with mocked import
-        raise RecognitionFailure(
-            "acrcloud_request_error",
-            "The requests package is not installed. Run: python3 -m pip install -r requirements.txt",
-        ) from error
+    """Send audio to ACRCloud and return the parsed JSON response.
 
+    `requests` is the primary transport. Some managed macOS environments
+    expose working DNS to system curl but not to Python's resolver, so a
+    network-only requests failure retries once through curl.
+    """
     timestamp = str(int(time.time()))
     string_to_sign = build_string_to_sign(access_key, timestamp)
     signature = sign_request(secret_key, string_to_sign)
@@ -330,6 +423,15 @@ def recognize_with_acrcloud(
         "signature_version": ACRCLOUD_SIGNATURE_VERSION,
     }
     try:
+        import requests  # imported lazily so credential errors surface first
+    except ImportError:
+        return recognize_with_curl_fallback(
+            audio_path,
+            url=url,
+            data=data,
+            timeout=timeout,
+        )
+    try:
         with open(audio_path, "rb") as sample_file:
             files = {"sample": (audio_path.name, sample_file, "application/octet-stream")}
             response = requests.post(
@@ -338,6 +440,19 @@ def recognize_with_acrcloud(
                 files=files,
                 timeout=max(5.0, timeout),
             )
+    except requests.RequestException as error:
+        try:
+            return recognize_with_curl_fallback(
+                audio_path,
+                url=url,
+                data=data,
+                timeout=timeout,
+            )
+        except RecognitionFailure as fallback_error:
+            raise RecognitionFailure(
+                "acrcloud_request_error",
+                f"ACRCloud requests transport failed ({error.__class__.__name__}); curl fallback failed: {fallback_error.message}",
+            ) from error
     except Exception as error:
         cls = error.__class__.__name__
         message = str(error).strip() or cls
