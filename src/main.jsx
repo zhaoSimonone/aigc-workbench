@@ -1165,6 +1165,7 @@ function Workspace({ user, onLogout }) {
               onBuild={buildMusicLibrary}
               building={buildingMusic}
               onEdit={(track) => setEditingMusicTrack(track)}
+              onTrackUnavailable={refreshMusicTracks}
             />
           ) : (
             <>
@@ -1449,7 +1450,7 @@ function Workspace({ user, onLogout }) {
   );
 }
 
-function MusicLibraryPanel({ tracks, loading, onBuild, building, onEdit }) {
+function MusicLibraryPanel({ tracks, loading, onBuild, building, onEdit, onTrackUnavailable }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("");
   const filteredTracks = useMemo(() => {
@@ -1497,7 +1498,7 @@ function MusicLibraryPanel({ tracks, loading, onBuild, building, onEdit }) {
                 </div>
                 {track.linkedAssets?.length > 0 && <p className="music-track-sources">来源：{track.linkedAssets.slice(0, 3).map((asset) => asset.name).join("、")}{track.linkedAssets.length > 3 ? ` 等 ${track.linkedAssets.length} 个` : ""}</p>}
                 {track.note && <p className="music-track-note">{track.note}</p>}
-                <audio controls preload="none" src={track.streamUrl} />
+                <audio controls preload="none" src={track.streamUrl} onError={onTrackUnavailable} />
               </div>
               <button className="icon-button music-edit-button" onClick={() => onEdit(track)} aria-label={`编辑${track.title || track.name}`} title="人工标记音乐">
                 <Pencil size={16} />
