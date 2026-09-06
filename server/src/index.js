@@ -1004,6 +1004,15 @@ app.post('/api/assets/import-urls', requireUser, async (req, res, next) => {
 app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
   try {
     const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory', 'musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'];
+    const hasParentAssetIds = Object.prototype.hasOwnProperty.call(req.body, 'parentAssetIds');
+    const requestedParentAssetIds = hasParentAssetIds ? parseTags(req.body.parentAssetIds) : [];
+    if (hasParentAssetIds && requestedParentAssetIds.some((id) => !uuidPattern.test(String(id)))) {
+      return res.status(400).json({ error: '关联素材 ID 无效' });
+    }
+    const parentAssetIds = requestedParentAssetIds;
+    if (hasParentAssetIds && parentAssetIds.some((id) => String(id).toLowerCase() === String(req.params.id).toLowerCase())) {
+      return res.status(400).json({ error: '素材不能关联自身' });
+    }
     const fields = [];
     const values = [];
     for (const key of allowed) {
@@ -1031,11 +1040,49 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
         fields.push(`${dbKey}=$${values.length}`);
       }
     }
-    if (!fields.length) return res.status(400).json({ error: '没有可更新字段' });
-    values.push(req.params.id, req.user.id);
-    const { rows } = await pool.query(`UPDATE assets SET ${fields.join(', ')} WHERE id=$${values.length - 1} AND user_id=$${values.length} AND deleted_at IS NULL RETURNING *`, values);
-    if (!rows[0]) return res.status(404).json({ error: '素材不存在' });
-    const hydrated = await assetQuery(rows[0].id, req.user.id);
+    if (!fields.length && !hasParentAssetIds) return res.status(400).json({ error: '没有可更新字段' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const owned = await client.query(
+        'SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL',
+        [req.params.id, req.user.id],
+      );
+      if (!owned.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: '素材不存在' });
+      }
+      if (fields.length) {
+        values.push(req.params.id, req.user.id);
+        await client.query(`UPDATE assets SET ${fields.join(', ')} WHERE id=$${values.length - 1} AND user_id=$${values.length} AND deleted_at IS NULL`, values);
+      }
+      if (hasParentAssetIds) {
+        if (parentAssetIds.length) {
+          const related = await client.query(
+            'SELECT id FROM assets WHERE id = ANY($1::uuid[]) AND user_id=$2 AND deleted_at IS NULL',
+            [parentAssetIds, req.user.id],
+          );
+          if (related.rows.length !== parentAssetIds.length) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: '关联素材不存在或不属于当前账号' });
+          }
+        }
+        await client.query('DELETE FROM asset_relations WHERE derived_asset_id=$1', [req.params.id]);
+        for (const parentId of parentAssetIds) {
+          await client.query(
+            'INSERT INTO asset_relations(source_asset_id,derived_asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING',
+            [parentId, req.params.id],
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    const hydrated = await assetQuery(req.params.id, req.user.id);
     res.json({ asset: await hydrateAsset(hydrated) });
   } catch (error) {
     next(error);

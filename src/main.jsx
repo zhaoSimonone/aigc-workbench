@@ -1432,7 +1432,9 @@ function Workspace({ user, onLogout }) {
       )}
       {editingAsset && (
         <EditAssetModal
+          key={editingAsset.id}
           asset={editingAsset}
+          assets={assets}
           onClose={() => setEditingAsset(null)}
           onSave={(fields) => saveAssetEdit(editingAsset.id, fields)}
           onReplace={(file) => replaceAssetFile(editingAsset.id, file)}
@@ -2442,7 +2444,7 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
   );
 }
 
-function EditAssetModal({ asset, onClose, onSave, onReplace }) {
+function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
   const [name, setName] = useState(asset.name || "");
   const [source, setSource] = useState(asset.source || "");
   const [sourceUrl, setSourceUrl] = useState(asset.sourceUrl || "");
@@ -2453,8 +2455,17 @@ function EditAssetModal({ asset, onClose, onSave, onReplace }) {
   const [note, setNote] = useState(asset.note || "");
   const [used, setUsed] = useState(Boolean(asset.used));
   const [replacementFile, setReplacementFile] = useState(null);
+  const [parentAssetIds, setParentAssetIds] = useState((asset.parentAssetIds || []).map(String));
+  const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const referenceAssets = assets.filter((item) => String(item.id) !== String(asset.id) && (item.type === "video" || item.type === "image"));
+  const selectedReferenceAssets = referenceAssets.filter((item) => parentAssetIds.includes(String(item.id)));
+  const referenceLabel = selectedReferenceAssets.length === 0
+    ? "不关联参考素材"
+    : selectedReferenceAssets.length === 1
+      ? selectedReferenceAssets[0].name
+      : `${selectedReferenceAssets[0].name} 等 ${selectedReferenceAssets.length} 个`;
   const submit = async (event) => {
     event.preventDefault();
     const trimmedName = name.trim();
@@ -2485,6 +2496,7 @@ function EditAssetModal({ asset, onClose, onSave, onReplace }) {
         note: note.trim(),
         used,
         tags,
+        parentAssetIds,
       });
     } catch (saveError) {
       setError(saveError.message || "保存失败，请稍后重试");
@@ -2553,6 +2565,49 @@ function EditAssetModal({ asset, onClose, onSave, onReplace }) {
           <label className="edit-field-wide">
             原视频链接 / 参考链接
             <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="粘贴原始链接" />
+          </label>
+          <label className="edit-field-wide">
+            关联参考素材
+            <div className="reference-picker">
+              <button
+                type="button"
+                className={`reference-picker-trigger ${selectedReferenceAssets.length ? "has-selection" : ""}`}
+                onClick={() => setParentPickerOpen((open) => !open)}
+                aria-expanded={parentPickerOpen}
+              >
+                <span>{referenceLabel}</span>
+                <ChevronDown size={15} />
+              </button>
+              {parentPickerOpen && (
+                <div className="reference-picker-menu">
+                  <div className="reference-picker-head">
+                    <span>可选，可多选</span>
+                    {selectedReferenceAssets.length > 0 && (
+                      <button type="button" onClick={() => setParentAssetIds([])}>清除选择</button>
+                    )}
+                  </div>
+                  {referenceAssets.length ? referenceAssets.map((item) => {
+                    const selectedReference = parentAssetIds.includes(String(item.id));
+                    return (
+                      <button
+                        type="button"
+                        className={`reference-option ${selectedReference ? "selected" : ""}`}
+                        key={item.id}
+                        onClick={() => setParentAssetIds((items) => selectedReference
+                          ? items.filter((id) => id !== String(item.id))
+                          : [...items, String(item.id)])}
+                      >
+                        <span className="reference-option-check">{selectedReference && <Check size={13} />}</span>
+                        <span>{item.name}</span>
+                      </button>
+                    );
+                  }) : (
+                    <div className="reference-empty">暂无可关联素材</div>
+                  )}
+                </div>
+              )}
+            </div>
+            <small>可不选，也可以多选参考素材</small>
           </label>
           <label className="edit-field-wide">
             素材标签
