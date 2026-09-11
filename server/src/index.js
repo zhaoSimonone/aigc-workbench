@@ -366,18 +366,52 @@ app.post('/api/auth/logout', async (req, res, next) => {
   }
 });
 
+async function albumCoverMap(userId, assetIds) {
+  const ids = [...new Set(assetIds.filter(Boolean))];
+  const covers = new Map();
+  if (!ids.length) return covers;
+  const { rows } = await pool.query(
+    'SELECT id, type, object_key, thumb_key FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
+    [userId, ids],
+  );
+  await Promise.all(rows.map(async (row) => {
+    const [src, thumb] = await Promise.all([
+      row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream`) : objectUrl(row.object_key),
+      row.thumb_key ? objectUrl(row.thumb_key) : Promise.resolve(''),
+    ]);
+    covers.set(row.id, { id: row.id, src, thumb });
+  }));
+  return covers;
+}
+
+async function publicAlbums(userId, rows) {
+  const covers = await albumCoverMap(userId, rows.map((row) => row.cover_asset_id));
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    assetCount: row.asset_count,
+    createdAt: row.created_at,
+    coverAssetId: row.cover_asset_id || null,
+    cover: covers.get(row.cover_asset_id) || null,
+  }));
+}
+
+function albumQueryWhere(where, params) {
+  return pool.query(
+    `SELECT ca.id, ca.name, ca.created_at, ca.cover_asset_id, COUNT(a.id)::int AS asset_count
+       FROM character_albums ca
+       LEFT JOIN assets a ON a.user_id=ca.user_id AND a.character_name=ca.name AND a.folder='角色设定' AND a.deleted_at IS NULL
+      WHERE ${where}
+      GROUP BY ca.id
+      ORDER BY ca.created_at ASC, ca.name ASC`,
+    params,
+  );
+}
+
 app.get('/api/character-albums', requireUser, async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT ca.id, ca.name, ca.created_at, COUNT(a.id)::int AS asset_count
-         FROM character_albums ca
-         LEFT JOIN assets a ON a.user_id=ca.user_id AND a.character_name=ca.name AND a.folder='角色设定' AND a.deleted_at IS NULL
-        WHERE ca.user_id=$1
-        GROUP BY ca.id
-        ORDER BY ca.created_at ASC, ca.name ASC`,
-      [req.user.id],
-    );
-    res.json({ albums: rows.map((row) => ({ id: row.id, name: row.name, assetCount: row.asset_count, createdAt: row.created_at })) });
+    const { rows } = await albumQueryWhere('ca.user_id=$1', [req.user.id]);
+    res.json({ albums: await publicAlbums(req.user.id, rows) });
   } catch (error) {
     next(error);
   }
@@ -391,9 +425,45 @@ app.post('/api/character-albums', requireUser, async (req, res, next) => {
       'INSERT INTO character_albums(user_id,name) VALUES($1,$2) RETURNING id,name,created_at',
       [req.user.id, name],
     );
-    res.status(201).json({ album: { id: rows[0].id, name: rows[0].name, assetCount: 0, createdAt: rows[0].created_at } });
+    res.status(201).json({
+      album: {
+        id: rows[0].id,
+        name: rows[0].name,
+        assetCount: 0,
+        createdAt: rows[0].created_at,
+        coverAssetId: null,
+        cover: null,
+      },
+    });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: '这个人物相册已经存在' });
+    next(error);
+  }
+});
+
+app.patch('/api/character-albums/:id', requireUser, async (req, res, next) => {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(req.body, 'coverAssetId')) {
+      return res.status(400).json({ error: '缺少封面素材参数' });
+    }
+    const raw = req.body.coverAssetId;
+    const coverAssetId = raw === null || raw === '' ? null : String(raw).trim();
+    if (coverAssetId && !uuidPattern.test(coverAssetId)) return res.status(400).json({ error: '封面素材 ID 无效' });
+    if (coverAssetId) {
+      const { rows } = await pool.query(
+        'SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL',
+        [coverAssetId, req.user.id],
+      );
+      if (!rows[0]) return res.status(400).json({ error: '封面素材不存在或不属于当前账号' });
+    }
+    const { rows: updated } = await pool.query(
+      'UPDATE character_albums SET cover_asset_id=$1 WHERE id=$2 AND user_id=$3 RETURNING id',
+      [coverAssetId, req.params.id, req.user.id],
+    );
+    if (!updated[0]) return res.status(404).json({ error: '人物相册不存在' });
+    const { rows } = await albumQueryWhere('ca.id=$1 AND ca.user_id=$2', [req.params.id, req.user.id]);
+    res.json({ album: (await publicAlbums(req.user.id, rows))[0] });
+  } catch (error) {
     next(error);
   }
 });
