@@ -95,12 +95,34 @@ class Client:
             pass
 
     def request(self, method, path, body=None, headers=None):
-        connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-        connection = connection_class(self.host, self.port, timeout=900)
-        request_headers = {"Accept": "application/json", **(headers or {})}
+        # Check for proxy configuration
+        proxy_url = os.environ.get("HTTPS_PROXY" if self.scheme == "https" else "HTTP_PROXY") or os.environ.get("https_proxy" if self.scheme == "https" else "http_proxy")
+
+        if proxy_url:
+            proxy_parsed = urlparse(proxy_url)
+            connection_class = http.client.HTTPSConnection if proxy_parsed.scheme == "https" else http.client.HTTPConnection
+            connection = connection_class(proxy_parsed.hostname, proxy_parsed.port or 80, timeout=900)
+
+            # Set up proxy authentication if present
+            proxy_headers = {}
+            if proxy_parsed.username and proxy_parsed.password:
+                import base64
+                credentials = f"{proxy_parsed.username}:{proxy_parsed.password}"
+                encoded = base64.b64encode(credentials.encode()).decode()
+                proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
+
+            # For HTTPS through proxy, use CONNECT tunnel
+            full_path = f"{self.scheme}://{self.host}:{self.port or (443 if self.scheme == 'https' else 80)}{self.base_path}{path}"
+        else:
+            connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
+            connection = connection_class(self.host, self.port, timeout=900)
+            full_path = f"{self.base_path}{path}"
+            proxy_headers = {}
+
+        request_headers = {"Accept": "application/json", **proxy_headers, **(headers or {})}
         if self.cookies:
             request_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-        connection.request(method, f"{self.base_path}{path}", body=body, headers=request_headers)
+        connection.request(method, full_path, body=body, headers=request_headers)
         response = connection.getresponse()
         payload = response.read()
         set_cookie = response.headers.get("Set-Cookie")
@@ -134,7 +156,8 @@ class Client:
             {"Content-Type": "application/json", "Content-Length": str(len(login_body))},
         )
         if status != 200:
-            raise RuntimeError((payload or {}).get("error", "AIGC Shelf 登录失败"))
+            error_msg = (payload or {}).get("error", "AIGC Shelf 登录失败")
+            raise RuntimeError(f"登录失败 (HTTP {status}): {error_msg}, 响应: {payload}")
         return payload.get("user", {})
 
     def find_existing(self, hashes):
