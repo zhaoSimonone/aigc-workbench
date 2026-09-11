@@ -35,6 +35,7 @@ description: Analyze and organize AIGC Shelf assets by real visual/audio content
 
 - 先听取音轨（必要时下载原视频），再结合原始来源链接、画面字幕/描述和可用的音频识别能力判断曲名与艺人。只凭旋律相似度不能写成确定答案。
 - 能确认时填写 `musicTitle`、`musicArtist`、`musicSource`、`musicStatus=已识别`、`musicConfidence`（`高`/`中`/`低`）和 `musicEvidence`（识别依据）。无法确认时使用 `musicStatus=待确认`，标题可留空，证据写明“未找到可靠匹配”；禁止编造歌名。
+- ACRCloud 的 `title`、`artist`、`album` 仅是候选元数据，`score=100` 只说明音频指纹命中其曲库，不能单独证明这些字段是公开发行曲目的正式信息。只有曲名和艺人能由来源链接、画面/原始发布信息，或 ACRCloud 返回的可访问第三方曲库 ID 交叉确认时，才可写入 `musicStatus=已识别`。没有交叉证据时保留 `musicStatus=待确认`，将候选值和 ACRCloud ID 记入 `musicEvidence` 供人工复核；不要把疑似上传者（如以 `@` 开头的名称）当作艺人，也不要把未验证的 `album` 当作专辑名。
 - 为便于统一剪辑，优先使用音乐结构化字段检索；不要为了音乐无限增加标签。只有音乐是素材的明确特色且仍不超过 5 个标签时，才加入一个 `音乐` 或 `音乐待识别` 标签，不再使用 `音乐·曲名` 这类额外标签。不要删除原有仍然准确的特色标签。
 - 无音轨、只有人声或无法听清时，记录 `musicStatus=无音乐/无法判断` 及原因，而不是把人声当成歌曲。
 
