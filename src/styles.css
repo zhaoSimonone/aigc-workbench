@@ -655,6 +655,7 @@ button {
   border-radius: 8px;
   background: #fff;
   color: #2e3433;
+  cursor: pointer;
   box-shadow: 0 4px 16px rgba(28, 32, 31, 0.04);
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
@@ -705,6 +706,111 @@ button {
 .album-create-button {
   align-self: flex-start;
   white-space: nowrap;
+}
+.album-cover-button {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(24, 28, 28, 0.68);
+  transition: background 0.15s ease;
+}
+.album-cover-button:hover {
+  background: rgba(24, 28, 28, 0.88);
+}
+.album-cover-modal {
+  width: min(640px, 100%);
+}
+.album-cover-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.album-cover-option {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #e0e1dc;
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.album-cover-option:hover {
+  border-color: #9ba8a1;
+  box-shadow: 0 6px 18px rgba(28, 32, 31, 0.08);
+}
+.album-cover-option.active {
+  border-color: #2e6f5e;
+  box-shadow: 0 0 0 1px #2e6f5e inset;
+}
+.album-cover-option:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+.album-cover-thumb {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1.15 / 1;
+  border-radius: 5px;
+  overflow: hidden;
+  background: #ecebe6;
+  color: #a8aeaa;
+}
+.album-cover-thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.album-cover-option strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.album-cover-option small {
+  color: #929a96;
+  font-size: 10px;
+}
+.album-cover-badge {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: #2e6f5e;
+  font-size: 10px;
+}
+.album-cover-saving {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(24, 28, 28, 0.55);
+  font-size: 12px;
+}
+.album-cover-empty-state {
+  margin-top: 18px;
+  padding: 26px 14px;
+  border-radius: 8px;
+  background: #f1f1ee;
+  color: #7d847f;
+  font-size: 12px;
+  text-align: center;
 }
 .album-create-modal {
   width: min(520px, 100%);
@@ -2090,6 +2196,9 @@ button {
   }
   .role-album-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .album-cover-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .video-account-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

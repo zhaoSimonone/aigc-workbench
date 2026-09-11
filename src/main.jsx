@@ -451,6 +451,7 @@ function Workspace({ user, onLogout }) {
   const [detailTrail, setDetailTrail] = useState([]);
   const [showUpload, setShowUpload] = useState(false);
   const [showAlbumCreator, setShowAlbumCreator] = useState(false);
+  const [coverPickerAlbum, setCoverPickerAlbum] = useState(null);
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
@@ -577,6 +578,8 @@ function Workspace({ user, onLogout }) {
   );
   const roleAlbums = useMemo(() => {
     if (activeFolder !== "角色设定" || activeCharacter) return [];
+    const albumMeta = new Map();
+    characterAlbums.forEach((album) => albumMeta.set(album.name, album));
     const groups = new Map();
     characterAlbums.forEach((album) => groups.set(album.name, { name: album.name, assets: [] }));
     filteredAssets.forEach((asset) => {
@@ -586,18 +589,27 @@ function Workspace({ user, onLogout }) {
       groups.set(name, existing);
     });
     return [...groups.values()]
-      .map((group) => ({
-        ...group,
-        count: group.assets.length,
-        cover: group.assets.find((asset) => asset.thumb || asset.src)?.thumb || group.assets.find((asset) => asset.src)?.src || "",
-        videoCount: group.assets.filter((asset) => asset.type === "video").length,
-        imageCount: group.assets.filter((asset) => asset.type === "image").length,
-        categoryCounts: group.assets.reduce((counts, asset) => {
-          const category = asset.characterCategory || "未分类";
-          counts[category] = (counts[category] || 0) + 1;
-          return counts;
-        }, {}),
-      }))
+      .map((group) => {
+        const meta = albumMeta.get(group.name);
+        const fixedCover = meta?.coverAssetId && meta.cover ? (meta.cover.thumb || meta.cover.src || "") : "";
+        return {
+          ...group,
+          count: group.assets.length,
+          cover: fixedCover
+            || group.assets.find((asset) => asset.thumb || asset.src)?.thumb
+            || group.assets.find((asset) => asset.src)?.src
+            || "",
+          albumId: meta && !String(meta.id).startsWith("local-") ? meta.id : null,
+          coverAssetId: meta?.coverAssetId || null,
+          videoCount: group.assets.filter((asset) => asset.type === "video").length,
+          imageCount: group.assets.filter((asset) => asset.type === "image").length,
+          categoryCounts: group.assets.reduce((counts, asset) => {
+            const category = asset.characterCategory || "未分类";
+            counts[category] = (counts[category] || 0) + 1;
+            return counts;
+          }, {}),
+        };
+      })
       .sort((a, b) => a.name.localeCompare(b.name, "zh"));
   }, [filteredAssets, characterAlbums, activeFolder, activeCharacter]);
   const updateAsset = async (id, patch) => {
@@ -676,6 +688,29 @@ function Workspace({ user, onLogout }) {
     setActiveTag("");
     setQuery("");
     return payload.album;
+  };
+  const setAlbumCover = async (albumName, coverAssetId) => {
+    let album = characterAlbums.find((item) => item.name === albumName);
+    if (!album || String(album.id).startsWith("local-")) {
+      const payload = await apiFetch("/character-albums");
+      const fresh = (payload.albums || []).find((item) => item.name === albumName);
+      if (fresh) {
+        setCharacterAlbums(payload.albums || []);
+        album = fresh;
+      } else {
+        const created = await apiFetch("/character-albums", {
+          method: "POST",
+          body: JSON.stringify({ name: albumName }),
+        });
+        setCharacterAlbums((albums) => [...albums, created.album]);
+        album = created.album;
+      }
+    }
+    const payload = await apiFetch(`/character-albums/${album.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ coverAssetId }),
+    });
+    setCharacterAlbums((albums) => albums.map((item) => (item.id === payload.album.id ? payload.album : item)));
   };
   const saveAssetEdit = async (id, fields) => {
     const { tags, ...assetFields } = fields;
@@ -1302,25 +1337,50 @@ function Workspace({ user, onLogout }) {
               roleAlbums.length ? (
                 <div className="role-album-grid">
                   {roleAlbums.map((album) => (
-                    <button
+                    <div
                       className="role-album-card"
                       key={album.name}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => {
                         setActiveCharacter(album.name);
                         setActiveCharacterCategory("");
                         setActiveFilter("全部");
                         setActiveTag("");
                       }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setActiveCharacter(album.name);
+                          setActiveCharacterCategory("");
+                          setActiveFilter("全部");
+                          setActiveTag("");
+                        }
+                      }}
                     >
                       <div className="role-album-cover">
                         {album.cover ? <img src={album.cover} alt="" /> : <FileImage size={28} />}
                         <span>{album.count} 个素材</span>
+                        {album.name !== "待归类人物" && (
+                          <button
+                            type="button"
+                            className="album-cover-button"
+                            title={album.coverAssetId ? "更换相册封面" : "设置相册封面"}
+                            aria-label={`设置「${album.name}」的相册封面`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setCoverPickerAlbum(album);
+                            }}
+                          >
+                            <ImagePlus size={14} />
+                          </button>
+                        )}
                       </div>
                       <div className="role-album-info">
                         <strong>{album.name}</strong>
                         <small>{Object.entries(album.categoryCounts).map(([category, count], index) => `${index ? " · " : ""}${category} ${count}`).join("")}</small>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -1405,6 +1465,17 @@ function Workspace({ user, onLogout }) {
         <CreateCharacterAlbumModal
           onClose={() => setShowAlbumCreator(false)}
           onCreate={createCharacterAlbum}
+        />
+      )}
+      {coverPickerAlbum && (
+        <AlbumCoverPickerModal
+          albumName={coverPickerAlbum.name}
+          currentCoverAssetId={coverPickerAlbum.coverAssetId}
+          assets={assets.filter(
+            (asset) => asset.characterName === coverPickerAlbum.name && asset.folder === "角色设定",
+          )}
+          onClose={() => setCoverPickerAlbum(null)}
+          onPick={(coverAssetId) => setAlbumCover(coverPickerAlbum.name, coverAssetId)}
         />
       )}
       {(showVideoAccountModal || editingVideoAccount) && (
@@ -2978,6 +3049,78 @@ function CreateCharacterAlbumModal({ onClose, onCreate }) {
           <button type="submit" className="primary-button" disabled={saving}><Plus size={16} />{saving ? "创建中…" : "创建并进入"}</button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function AlbumCoverPickerModal({ albumName, assets, currentCoverAssetId, onClose, onPick }) {
+  const [savingId, setSavingId] = useState(null);
+  const [error, setError] = useState("");
+  const candidates = useMemo(() => {
+    const rank = (asset) =>
+      (asset.characterCategory === "正脸" ? 0 : 1) * 10 + (asset.type === "image" ? 0 : 1);
+    return [...assets].sort(
+      (a, b) => rank(a) - rank(b) || new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+    );
+  }, [assets]);
+  const pick = async (assetId) => {
+    setSavingId(assetId === null ? "reset" : assetId);
+    setError("");
+    try {
+      await onPick(assetId);
+      onClose();
+    } catch (pickError) {
+      setError(pickError.message || "保存失败，请稍后重试");
+    } finally {
+      setSavingId(null);
+    }
+  };
+  return (
+    <div className="modal-layer edit-layer" onClick={onClose}>
+      <div className="edit-modal album-cover-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">ALBUM COVER</p>
+            <h2>设置相册封面</h2>
+            <p className="modal-subtitle">为「{albumName}」选择一张固定封面，设置后不会因为上传新素材而变化。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+        </div>
+        {candidates.length ? (
+          <div className="album-cover-grid">
+            {candidates.map((asset) => (
+              <button
+                type="button"
+                key={asset.id}
+                className={`album-cover-option${asset.id === currentCoverAssetId ? " active" : ""}`}
+                onClick={() => pick(asset.id)}
+                disabled={savingId !== null}
+              >
+                <span className="album-cover-thumb">
+                  {asset.thumb || asset.src ? <img src={asset.thumb || asset.src} alt={asset.name} /> : <FileImage size={20} />}
+                </span>
+                <strong>{asset.name}</strong>
+                <small>{[asset.characterCategory || "未分类", asset.type === "video" ? "视频" : "图片"].join(" · ")}</small>
+                {asset.id === currentCoverAssetId && <span className="album-cover-badge">当前封面</span>}
+                {savingId === asset.id && <span className="album-cover-saving">保存中…</span>}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="album-cover-empty-state">这个相册还没有素材，先上传再设置封面。</div>
+        )}
+        {error && <div className="auth-error edit-error">{error}</div>}
+        <div className="modal-foot">
+          {currentCoverAssetId ? (
+            <button type="button" className="text-button" onClick={() => pick(null)} disabled={savingId !== null}>
+              恢复自动封面
+            </button>
+          ) : (
+            <span />
+          )}
+          <button type="button" className="secondary-button" onClick={onClose}>取消</button>
+        </div>
+      </div>
     </div>
   );
 }

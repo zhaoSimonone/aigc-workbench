@@ -99,9 +99,11 @@ CREATE TABLE IF NOT EXISTS character_albums (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  cover_asset_id UUID REFERENCES assets(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(user_id, name)
 );
+ALTER TABLE character_albums ADD COLUMN IF NOT EXISTS cover_asset_id UUID REFERENCES assets(id) ON DELETE SET NULL;
 INSERT INTO character_albums(user_id, name)
 SELECT DISTINCT user_id, character_name
 FROM assets
