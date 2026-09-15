@@ -17,11 +17,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-DEFAULT_API_BASE = "https://hairfree.corp.kuaishou.com/v1"
+DEFAULT_API_BASE = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-image-2"
-DEFAULT_SIZE = "1024x1536"
-DEFAULT_QUALITY = "high"
-DEFAULT_ENDPOINT_MODE = "generations"
+DEFAULT_SIZE = "1152x2048"
+DEFAULT_QUALITY = "medium"
 
 
 def read_prompt(args: argparse.Namespace) -> tuple[str, Path | None]:
@@ -97,7 +96,6 @@ def call_openai(
     api_base: str,
     size: str,
     quality: str,
-    endpoint_mode: str,
     timeout: int,
 ) -> None:
     api_key = os.environ.get("IMAGE_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -106,23 +104,16 @@ def call_openai(
 
     common = {"model": model, "prompt": prompt, "size": size, "quality": quality, "n": 1}
     headers = {"Authorization": f"Bearer {api_key}"}
-    if endpoint_mode == "edits":
-        if not references:
-            raise ValueError("endpoint-mode=edits requires at least one --reference")
+    if references:
+        # Reference images imply an image-input endpoint; text-only backends
+        # should be driven without --reference so the JSON generations path is used.
         body, boundary = multipart_body(common, references)
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
         url = f"{api_base.rstrip('/')}/images/edits"
-    elif endpoint_mode == "generations":
-        if references:
-            raise ValueError(
-                "endpoint-mode=generations does not accept --reference; "
-                "describe the references in the prompt or use endpoint-mode=edits"
-            )
+    else:
         body = json.dumps(common).encode("utf-8")
         headers["Content-Type"] = "application/json"
         url = f"{api_base.rstrip('/')}/images/generations"
-    else:
-        raise ValueError("endpoint-mode must be generations or edits")
 
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -192,12 +183,6 @@ def main() -> int:
     )
     parser.add_argument("--size", default=os.environ.get("IMAGE_SIZE", DEFAULT_SIZE))
     parser.add_argument("--quality", default=os.environ.get("IMAGE_QUALITY", DEFAULT_QUALITY))
-    parser.add_argument(
-        "--endpoint-mode",
-        choices=("generations", "edits"),
-        default=os.environ.get("IMAGE_ENDPOINT_MODE", DEFAULT_ENDPOINT_MODE),
-        help="API request shape; generations sends JSON, edits sends multipart references",
-    )
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -208,13 +193,14 @@ def main() -> int:
             raise ValueError("prompt is empty")
         references = validate_references(args.reference)
         output = args.out.resolve()
+        endpoint_mode = "edits" if references else "generations"
 
         if args.dry_run:
             summary = {
                 "provider": args.provider,
                 "model": args.model,
                 "api_base": args.api_base if args.provider == "openai" else None,
-                "endpoint_mode": args.endpoint_mode,
+                "endpoint_mode": endpoint_mode,
                 "prompt_file": str(prompt_file) if prompt_file else None,
                 "prompt": prompt if prompt_file is None else None,
                 "references": [str(path) for path in references],
@@ -243,7 +229,6 @@ def main() -> int:
                 args.api_base,
                 args.size,
                 args.quality,
-                args.endpoint_mode,
                 args.timeout,
             )
         elif args.provider == "command":

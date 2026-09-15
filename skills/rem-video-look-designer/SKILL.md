@@ -32,20 +32,21 @@ Turn an input video into one or more production-ready Rem look reference images 
 
    Inspect both contact sheets. Identify the first frame belonging to the transformed look, set the opening boundary immediately before it, and rerun the opening extraction with `--front-end SECONDS_OR_TIMECODE`. Never infer the opening style from a provisional sample that already contains the transformed outfit.
 
-2. Read [references/rem-identity.md](references/rem-identity.md) before designing any look. Inspect the bundled images there as identity and hair references, not as mandatory wardrobe references.
+2. Read [references/rem-identity.md](references/rem-identity.md) before designing any look. Use the bundled assets hierarchically: `rem-warm-portrait.png` is the always-on face and makeup anchor; then choose exactly one hair/body anchor—`rem-identity-full.png` for compact or medium hair, or `rem-long-wave.png` for chest-length moving waves. Never treat all three as equal hair references. They are identity assets, not wardrobe references.
 
 3. Read [references/prompt-contract.md](references/prompt-contract.md). Analyze the opening segment for framing, pose, lighting direction, palette, background, hair movement, garment silhouette, motion/occlusion risks, and the contrast created by the later transformation.
 
 4. Select the task mode from the user's request:
 
-   - `new-look` (default for “新妆造”): redesign Rem's makeup, hair, and outfit to fit the opening segment.
-   - `identity-only`: replace only face and hair. Lock the video's body, clothing geometry, neckline, exposed-skin area, material, color, motion, camera, background, and timing exactly. Ignore wardrobe and body information in still-image references.
+   - `source-locked-look` (default when the reference image will replace a person in an existing video): redesign Rem's face, makeup, and motion-compatible hair, but reproduce the source video's clothing exactly. Lock garment type, neckline, straps, coverage, hem, waistband, material, color, print/logo placement, drawstrings, fasteners, and silhouette. Do not simplify distinctive garment graphics.
+   - `new-look` (only when the user explicitly asks to redesign the outfit): redesign Rem's makeup, hair, and wardrobe to fit the opening segment.
+   - `identity-only`: replace only face and hair in the video itself. Lock the video's body, clothing geometry, neckline, exposed-skin area, material, color, motion, camera, background, and timing exactly. Ignore wardrobe and body information in still-image references.
 
    If the request is genuinely ambiguous and the modes would create materially different results, ask one concise question.
 
 5. Produce the requested number of concepts; otherwise produce three meaningfully different concepts. Vary silhouette, styling language, and palette—not merely color. Rank them for opening-hook strength, Rem recognizability, motion stability, and contrast with the transformed second half.
 
-6. For each concept, write a prompt packet using the contract. The prompt must state the role of every reference image. A video frame supplies composition, pose, lighting, and source-scene cues; bundled Rem images supply identity, hair color, fringe, and signature accessories.
+6. For each concept, write a prompt packet using the contract. State the role of every reference image. A video frame supplies composition, pose, lighting, source clothing, and scene cues; the face anchor supplies identity and makeup; exactly one conditional hair anchor supplies hair length and motion.
 
 7. Generate the images with the backend the user specifies. If no built-in image tool is available, read [references/image-backends.md](references/image-backends.md) and run `scripts/generate_reference.py`. The script defaults to `gpt-image-2` but the provider, model, base URL, and custom command adapter are configurable. Never place API keys in prompts, files, logs, or command arguments. Do not make more than two paid generation attempts per concept without user confirmation, and never automatically retry moderation or user-input errors.
 
@@ -57,9 +58,14 @@ Turn an input video into one or more production-ready Rem look reference images 
 - Hair choice follows source motion: use the bob for compact/static motion; chest-length soft S-waves for a source with dynamic long hair. Never use waist-length hair or dense curls that obscure hands, neckline, waist, or face.
 - Natural realistic skin and makeup; no plastic skin or aggressive whitening.
 - Clear hands, shoulders, waist, and feet when present in the source framing. No fused limbs, extra fingers, warped shoes, floating accessories, text, logos, or watermarks.
+- `source-locked-look`: compare the result against a clear source frame garment-by-garment. Clothing type, neckline, straps, coverage, crop/hem, waistband, fabric, base color, edging, drawstrings, fasteners, and distinctive prints or licensed character patches must match in placement and scale. Treat any mismatch as a failed QC because it can cause deformation during video replacement. Garment-native graphics are allowed; unrelated captions and watermarks are not.
 - `new-look`: garments remain readable during the source motion; avoid long loose ribbons, chains, tassels, and unstable multilayer hems unless the source action is nearly static.
 - `identity-only`: source clothing remains pixel-semantically unchanged in design, coverage, color, and silhouette. In particular, do not raise, shrink, close, or redesign an existing neckline.
 - Match source aspect ratio unless the user requests a different deliverable. For vertical short video, prefer a 9:16 full-body or source-matched crop.
+
+## CapCut prompt output
+
+When the user asks for a CapCut/剪映 replacement prompt, read the `identity-only` section in [references/prompt-contract.md](references/prompt-contract.md). In the external prompt, call the subject “参考图片中的同一位成年蓝发女性”; do not rely on a copyrighted character name. The source video remains the sole authority for body, clothing, neckline, coverage, motion, expression timing, camera, background, text, and audio. Include natural hair-strand physics and facial micro-expression constraints so the result does not look like a plastic wig or frozen mask.
 
 ## Deliverables
 
@@ -73,6 +79,7 @@ OUTPUT/
   concept-01/prompt.md
   concept-01/reference.png
   concept-01/qc.md
+  capcut-prompt.md                 # when requested
   concept-02/...
 ```
 
