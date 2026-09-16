@@ -8,6 +8,8 @@
 
 接口形态(2026-09 服务端约定):
 - POST /v1/images/generations 创建任务,响应 {"id":"tsk_img_...","status":"pending",...}
+- POST /v1/images/edits 同样创建异步任务(multipart,字段 image[];由调用方
+  generate_reference.py 通过环境变量 IMAGE_REFERENCE_LIST 传入参考图路径列表)
 - GET  /v1/images/generations/{id} 轮询,pending -> in_progress -> completed
 - 完成后 result.data[0].url(约 24h 过期,需立即转存)或 b64_json
 - size 为比例字符串(如 "4:5"、"9:16");quality 字段仅 gpt-image-2.5-flare 支持
@@ -18,11 +20,13 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import mimetypes
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 DEFAULT_BASE = "https://toapis.cn/v1"
@@ -36,6 +40,42 @@ def api_call(url: str, api_key: str, payload: dict | None = None, timeout: int =
         headers["Content-Type"] = "application/json"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"toapis HTTP {exc.code}: {detail[:2000]}") from exc
+
+
+def multipart_submit(url: str, api_key: str, prompt: str, model: str, size: str,
+                     quality: str, references: list[Path], timeout: int = 300) -> dict:
+    boundary = f"----toapis-{uuid.uuid4().hex}"
+    fields: dict[str, str] = {"model": model, "prompt": prompt, "size": size, "n": "1"}
+    if quality and model != "gpt-image-2":
+        fields["quality"] = quality
+
+    def line(value: str) -> bytes:
+        return value.encode("utf-8") + b"\r\n"
+
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(line(f"--{boundary}"))
+        chunks.append(line(f'Content-Disposition: form-data; name="{name}"'))
+        chunks.append(b"\r\n")
+        chunks.append(line(value))
+    for path in references:
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        chunks.append(line(f"--{boundary}"))
+        chunks.append(line(f'Content-Disposition: form-data; name="image[]"; filename="{path.name}"'))
+        chunks.append(line(f"Content-Type: {media_type}"))
+        chunks.append(b"\r\n")
+        chunks.append(path.read_bytes())
+        chunks.append(b"\r\n")
+    chunks.append(line(f"--{boundary}--"))
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": f"multipart/form-data; boundary={boundary}"}
+    request = urllib.request.Request(url, data=b"".join(chunks), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -101,7 +141,19 @@ def main() -> int:
     output = args.out.resolve()
     started = time.time()
 
-    task = api_call(f"{base}/images/generations", api_key, payload)
+    reference_list = json.loads(os.environ.get("IMAGE_REFERENCE_LIST") or "[]")
+    references = [Path(p) for p in reference_list]
+    for path in references:
+        if not path.is_file():
+            print(f"error: reference image not found: {path}", file=sys.stderr)
+            return 2
+    if references:
+        task = multipart_submit(
+            f"{base}/images/edits", api_key, prompt, args.model, args.size,
+            args.quality, references,
+        )
+    else:
+        task = api_call(f"{base}/images/generations", api_key, payload)
     task_id = task.get("id")
     if not task_id:
         print(f"error: no task id in response: {json.dumps(task)[:800]}", file=sys.stderr)

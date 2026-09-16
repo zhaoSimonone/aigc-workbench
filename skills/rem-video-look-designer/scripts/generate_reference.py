@@ -55,7 +55,7 @@ def multipart_body(fields: dict[str, str], references: list[Path]) -> tuple[byte
         chunks.append(line(f"--{boundary}"))
         chunks.append(line(f'Content-Disposition: form-data; name="{name}"'))
         chunks.append(b"\r\n")
-        chunks.append(line(value))
+        chunks.append(line(str(value)))
     for path in references:
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         chunks.append(line(f"--{boundary}"))
