@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""量化比对发色:统计图中蓝色系头发像素的中位 HSV,用于生成图与锚点图的客观比对。
+"""量化比对发色:统计蓝色系头发像素的色相/饱和度/亮区明度,客观比对生成图与锚点。
 
 用法:
     python scripts/hair_color_check.py IMAGE [IMAGE ...]
 
-输出每张图蓝色系像素占比与中位饱和度(S)/明度(V)。QC 时先生成锚点基准值
-(如 rem-warm-portrait.png),生成图的 S/V 与基准偏差超过约 ±0.08 即判发色
-过亮/过暗/过饱和,应调整提示词后重生成,而不是仅凭目检。
+输出:中位色相 hue、中位饱和度 med_S、受光发冠明度 亮区V(p75)、高饱区S(p90)。
+蕾姆假发蓝的目标带(以三张锚点实测):hue 0.59-0.63,亮区V 0.76-0.89,
+高饱区S ~0.34。生成图亮区V 低于锚点带约 0.2 即发灰/发暗(常见失败模式),
+明度饱和但色相正确为合格;全量中位数会被阴影发丝拉低,不要用其判定。
 """
 
 from __future__ import annotations
@@ -19,18 +20,27 @@ from PIL import Image
 def hair_stats(path: str) -> dict | None:
     img = Image.open(path).convert("RGB").resize((256, 455))
     px = list(img.getdata())
-    vals: list[tuple[float, float]] = []
+    vals: list[tuple[float, float, float]] = []
     for r, g, b in px:
         h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-        # 蓝色系: hue 0.52-0.68,排除低饱和背景与肤色
-        if 0.52 <= h <= 0.68 and s > 0.12 and v > 0.25:
-            vals.append((s, v))
+        # 蓝色系: hue 0.50-0.70,排除低饱和背景与肤色
+        if 0.50 <= h <= 0.70 and s > 0.10 and v > 0.20:
+            vals.append((h, s, v))
     if not vals:
         return None
-    vals.sort()
+    vals.sort(key=lambda x: x[2])
     n = len(vals)
-    med = vals[n // 2]
-    return {"blue_pix_pct": round(100 * n / len(px)), "median_S": round(med[0], 2), "median_V": round(med[1], 2)}
+    med_h = sorted(v[0] for v in vals)[n // 2]
+    med_s = sorted(v[1] for v in vals)[n // 2]
+    p75_v = vals[int(n * 0.75)][2]
+    p90_s = sorted(v[1] for v in vals)[int(n * 0.90)]
+    return {
+        "blue_pix_pct": round(100 * n / len(px)),
+        "hue": round(med_h, 2),
+        "med_S": round(med_s, 2),
+        "lit_V_p75": round(p75_v, 2),
+        "sat_S_p90": round(p90_s, 2),
+    }
 
 
 def main() -> int:
