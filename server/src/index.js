@@ -875,18 +875,21 @@ app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
   try {
     const row = await assetQuery(req.params.id, req.user.id);
     if (!row) return res.status(404).json({ error: '素材不存在' });
-    const metadata = await headObject(row.object_key);
-    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
     const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
     const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
     const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-    res.set({
-      'Content-Type': row.content_type || 'application/octet-stream',
-      'Content-Length': String(total),
-      'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}`,
-    });
-    cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Output: res }, (error) => {
-      if (error && !res.headersSent) next(error);
+    // 302 到预签名 COS 直链，绕过本机带宽中转；签名覆盖 response-content-disposition 以强制浏览器下载
+    cos.getObjectUrl({
+      Bucket: bucket,
+      Region: region,
+      Key: row.object_key,
+      Sign: true,
+      Expires: 300,
+      Query: { 'response-content-disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}` },
+    }, (error, data) => {
+      if (error) return next(error);
+      res.redirect(302, data.Url);
     });
   } catch (error) {
     next(error);
