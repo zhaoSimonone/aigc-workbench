@@ -900,6 +900,36 @@ app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
   }
 });
 
+app.get('/api/assets/:id/download-url', requireUser, async (req, res, next) => {
+  try {
+    const row = await assetQuery(req.params.id, req.user.id);
+    if (!row) return res.status(404).json({ error: '素材不存在' });
+    if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
+    const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
+    const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
+    const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+    const url = await new Promise((resolve, reject) => {
+      cos.getObjectUrl({
+        Bucket: bucket,
+        Region: region,
+        Key: row.object_key,
+        Sign: true,
+        Expires: 600,
+        Query: {
+          'response-content-disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}`,
+          'response-content-type': 'application/octet-stream',
+        },
+      }, (error, data) => {
+        if (error || !data?.Url) reject(error || new Error('生成下载地址失败'));
+        else resolve(data.Url);
+      });
+    });
+    res.json({ url, filename });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/assets', requireUser, upload.single('file'), async (req, res, next) => {
   let tempPath = req.file && req.file.path;
   try {

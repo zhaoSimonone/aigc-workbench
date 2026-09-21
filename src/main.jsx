@@ -63,6 +63,9 @@ const PROMPT_LINK_ROLES = [
   { value: "generated_output", label: "生成结果", hint: "AI 生成后的作品", types: ["video", "image"] },
 ];
 
+const WECHAT_UA = /MicroMessenger/i;
+const BLOB_DOWNLOAD_LIMIT = 300 * 1024 * 1024;
+
 const seedAssets = [
   {
     id: 1,
@@ -452,6 +455,8 @@ function Workspace({ user, onLogout }) {
   const [showUpload, setShowUpload] = useState(false);
   const [showAlbumCreator, setShowAlbumCreator] = useState(false);
   const [coverPickerAlbum, setCoverPickerAlbum] = useState(null);
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const progressTickRef = useRef(0);
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
@@ -711,6 +716,77 @@ function Workspace({ user, onLogout }) {
       body: JSON.stringify({ coverAssetId }),
     });
     setCharacterAlbums((albums) => albums.map((item) => (item.id === payload.album.id ? payload.album : item)));
+  };
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    try {
+      const input = document.createElement("textarea");
+      input.value = text;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const ok = document.execCommand("copy");
+      input.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+  const downloadAsset = async (asset) => {
+    if (WECHAT_UA.test(navigator.userAgent)) {
+      const link = `${window.location.origin}/api/assets/${asset.id}/download`;
+      const copied = await copyText(link);
+      window.alert(copied
+        ? "微信内无法直接下载文件，下载链接已复制。请点右上角「···」→「在浏览器打开」，在地址栏粘贴并打开链接即可高速下载。"
+        : "微信内无法直接下载文件。请点右上角「···」→「在浏览器打开」后，重新点击下载。");
+      return;
+    }
+    if (downloadProgress) return;
+    setDownloadProgress({ name: asset.name, phase: "prepare", received: 0, total: 0 });
+    try {
+      const { url, filename } = await apiFetch(`/assets/${asset.id}/download-url`);
+      setDownloadProgress((progress) => progress && { ...progress, phase: "download" });
+      const response = await fetch(url, { credentials: "omit" });
+      if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      setDownloadProgress((progress) => progress && { ...progress, total });
+      let blob;
+      if (total > BLOB_DOWNLOAD_LIMIT) {
+        blob = await response.blob();
+      } else {
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          const now = Date.now();
+          if (now - progressTickRef.current > 120) {
+            progressTickRef.current = now;
+            setDownloadProgress((progress) => progress && { ...progress, received });
+          }
+        }
+        blob = new Blob(chunks, { type: "application/octet-stream" });
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename || asset.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+    } catch (error) {
+      setLoadError(error.message || "下载失败，请稍后重试");
+    } finally {
+      setDownloadProgress(null);
+    }
   };
   const saveAssetEdit = async (id, fields) => {
     const { tags, ...assetFields } = fields;
@@ -1437,6 +1513,7 @@ function Workspace({ user, onLogout }) {
           onDelete={() => deleteAsset(selected.id)}
           onNavigate={openRelatedAsset}
           onBack={detailTrail.length ? backToPreviousAsset : undefined}
+          onDownload={downloadAsset}
           onAssetUpdated={(updated) => {
             setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
             setSelected(updated);
@@ -1477,6 +1554,30 @@ function Workspace({ user, onLogout }) {
           onClose={() => setCoverPickerAlbum(null)}
           onPick={(coverAssetId) => setAlbumCover(coverPickerAlbum.name, coverAssetId)}
         />
+      )}
+      {downloadProgress && (
+        <div className="download-toast" role="status">
+          <Download size={16} />
+          <div className="download-toast-info">
+            <strong>{downloadProgress.name}</strong>
+            <span>
+              {downloadProgress.phase === "prepare"
+                ? "准备中…"
+                : downloadProgress.total
+                  ? `${Math.min(100, Math.round((downloadProgress.received / downloadProgress.total) * 100))}% · ${formatBytes(downloadProgress.received)} / ${formatBytes(downloadProgress.total)}`
+                  : `${formatBytes(downloadProgress.received)}`}
+            </span>
+          </div>
+          <div className="download-toast-bar">
+            <i
+              style={{
+                width: downloadProgress.total
+                  ? `${Math.min(100, (downloadProgress.received / downloadProgress.total) * 100)}%`
+                  : "12%",
+              }}
+            />
+          </div>
+        </div>
       )}
       {(showVideoAccountModal || editingVideoAccount) && (
         <VideoAccountModal
@@ -2116,7 +2217,7 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
   );
 }
 
-function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTagsUpdated, onEdit, onDelete, onNavigate, onBack, onAssetUpdated }) {
+function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTagsUpdated, onEdit, onDelete, onNavigate, onBack, onAssetUpdated, onDownload }) {
   const [editingTags, setEditingTags] = useState(false);
   const [tagsText, setTagsText] = useState(asset.tags.join(" "));
   const [savingTags, setSavingTags] = useState(false);
@@ -2487,14 +2588,10 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
               <Pencil size={16} />
               编辑素材
             </button>
-            <a
-              className="secondary-button"
-              href={`${API_BASE}/assets/${asset.id}/download`}
-              download
-            >
+            <button type="button" className="secondary-button" onClick={() => onDownload?.(asset)}>
               <Download size={16} />
               下载原文件
-            </a>
+            </button>
             <button className="primary-button">
               <Copy size={16} />
               复制链接
