@@ -457,6 +457,7 @@ function Workspace({ user, onLogout }) {
   const [coverPickerAlbum, setCoverPickerAlbum] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(null);
   const progressTickRef = useRef(0);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
@@ -645,27 +646,83 @@ function Workspace({ user, onLogout }) {
     setDetailTrail((trail) => trail.slice(0, -1));
     setSelected(previous);
   };
+  const buildUploadFields = (file, metadata, total) => {
+    const requestedName = String(metadata.name || "").trim();
+    const fileStem = file.name.replace(/\.[^/.]+$/, "");
+    return {
+      name: requestedName ? (total === 1 ? requestedName : `${requestedName} · ${fileStem}`) : "",
+      source: metadata.source || "本地导入",
+      sourceUrl: metadata.sourceUrl || "",
+      characterName: metadata.characterName || "",
+      characterCategory: metadata.characterCategory || "",
+      tags: metadata.tags || [],
+      used: Boolean(metadata.used),
+      folder: metadata.folder || "灵感收集",
+      parentAssetIds: metadata.parentAssetIds || [],
+    };
+  };
+  const uploadDirect = async (file, fields, onProgress) => {
+    const ticket = await apiFetch("/assets/upload-ticket", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream" }),
+    });
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", ticket.url);
+      xhr.setRequestHeader("Content-Type", ticket.contentType);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100), "upload");
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`云存储直传失败（HTTP ${xhr.status}）`)));
+      xhr.onerror = () => reject(new Error("网络中断，直传失败"));
+      xhr.send(file);
+    });
+    onProgress(100, "finalize");
+    const payload = await apiFetch("/assets/finalize-upload", {
+      method: "POST",
+      body: JSON.stringify({ ...fields, objectKey: ticket.objectKey, filename: file.name, size: file.size }),
+    });
+    return normaliseAsset(payload.asset);
+  };
+  const uploadViaServer = async (file, fields) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (fields.name) form.append("name", fields.name);
+    form.append("source", fields.source);
+    form.append("sourceUrl", fields.sourceUrl);
+    form.append("characterName", fields.characterName);
+    form.append("characterCategory", fields.characterCategory);
+    form.append("tags", JSON.stringify(fields.tags));
+    form.append("used", String(fields.used));
+    form.append("folder", fields.folder);
+    if (fields.parentAssetIds?.length) form.append("parentAssetIds", JSON.stringify(fields.parentAssetIds));
+    const payload = await apiFetch("/assets", { method: "POST", body: form });
+    return normaliseAsset(payload.asset);
+  };
   const handleUpload = async (files, metadata) => {
     setUploading(true);
     setLoadError("");
     try {
       const uploaded = [];
-      for (const file of files) {
-        const form = new FormData();
-        form.append("file", file);
-        const requestedName = String(metadata.name || "").trim();
-        const fileStem = file.name.replace(/\.[^/.]+$/, "");
-        if (requestedName) form.append("name", files.length === 1 ? requestedName : `${requestedName} · ${fileStem}`);
-        form.append("source", metadata.source || "本地导入");
-        form.append("sourceUrl", metadata.sourceUrl || "");
-        form.append("characterName", metadata.characterName || "");
-        form.append("characterCategory", metadata.characterCategory || "");
-        form.append("tags", JSON.stringify(metadata.tags || []));
-        form.append("used", String(Boolean(metadata.used)));
-        form.append("folder", metadata.folder || "灵感收集");
-        if (metadata.parentAssetIds?.length) form.append("parentAssetIds", JSON.stringify(metadata.parentAssetIds));
-        const payload = await apiFetch("/assets", { method: "POST", body: form });
-        uploaded.push(normaliseAsset(payload.asset));
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const fields = buildUploadFields(file, metadata, files.length);
+        let asset;
+        try {
+          setUploadProgress({ name: file.name, percent: 0, phase: "upload", index, total: files.length });
+          asset = await uploadDirect(file, fields, (percent, phase) =>
+            setUploadProgress((progress) =>
+              progress && progress.index === index && progress.phase === "upload"
+                ? { ...progress, percent, phase }
+                : progress,
+            ),
+          );
+        } catch (directError) {
+          console.warn("COS 直传失败，回退服务器上传:", directError);
+          setUploadProgress({ name: file.name, percent: 0, phase: "server", index, total: files.length });
+          asset = await uploadViaServer(file, fields);
+        }
+        uploaded.push(asset);
       }
       setAssets((items) => [...uploaded, ...items]);
       if (metadata.characterName) {
@@ -678,6 +735,7 @@ function Workspace({ user, onLogout }) {
       setLoadError(error.message);
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
   const createCharacterAlbum = async (name) => {
@@ -1541,6 +1599,7 @@ function Workspace({ user, onLogout }) {
           fileInput={fileInput}
           assets={assets}
           uploading={uploading}
+          progress={uploadProgress}
           defaultFolder={uploadDefaultFolder}
           defaultCharacterName={activeFolder === "角色设定" ? activeCharacter : ""}
           characterAlbums={characterAlbums}
@@ -2812,7 +2871,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
   );
 }
 
-function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultFolder, defaultCharacterName, characterAlbums }) {
+function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress, defaultFolder, defaultCharacterName, characterAlbums }) {
   const [files, setFiles] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [name, setName] = useState("");
@@ -3091,6 +3150,27 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
           </div>
           <Check size={17} className="destination-check" />
         </div>
+        {uploading && progress && (
+          <div className="upload-progress">
+            <div className="upload-progress-head">
+              <span className="upload-progress-name">{progress.name}</span>
+              <span className="upload-progress-meta">
+                {progress.index + 1}/{progress.total}
+                {progress.phase === "upload"
+                  ? ` · ${progress.percent}%`
+                  : progress.phase === "finalize"
+                    ? " · 生成封面并写入数据库"
+                    : " · 服务器通道"}
+              </span>
+            </div>
+            <div className="upload-progress-bar">
+              <i
+                className={progress.phase === "upload" ? "" : "pulsing"}
+                style={{ width: progress.phase === "upload" ? `${progress.percent}%` : "100%" }}
+              />
+            </div>
+          </div>
+        )}
         <div className="modal-foot">
           <button className="text-button" onClick={onClose}>
             取消
@@ -3101,7 +3181,15 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, defaultF
             onClick={submit}
           >
             <Upload size={16} />
-            {uploading ? "上传中…" : "确认上传"}
+            {uploading
+              ? progress?.phase === "upload"
+                ? `直传中 ${progress.percent}%`
+                : progress?.phase === "finalize"
+                  ? "处理中…"
+                  : progress?.phase === "server"
+                    ? "服务器通道上传中…"
+                    : "上传中…"
+              : "确认上传"}
           </button>
         </div>
       </div>

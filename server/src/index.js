@@ -245,6 +245,66 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
   }
 }
 
+function downloadObject(key, destination) {
+  return new Promise((resolve, reject) => {
+    cos.getObject({ Bucket: bucket, Region: region, Key: key, Output: fs.createWriteStream(destination) }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function assetTypeFromMime(mimeType) {
+  return mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('video/') ? 'video' : '';
+}
+
+async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
+  let thumbKey = null;
+  try {
+    let durationSeconds = null;
+    if (type === 'video') {
+      const previewPath = `${tempPath}.jpg`;
+      try {
+        durationSeconds = await inspectVideo(tempPath, previewPath);
+        thumbKey = `${objectKey}.jpg`;
+        await putObject(thumbKey, previewPath, 'image/jpeg');
+      } catch (error) {
+        console.warn('Video preview generation skipped:', error.message);
+      } finally {
+        await fsp.unlink(previewPath).catch(() => {});
+      }
+    }
+    const sha256 = await hashFile(tempPath);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (folder === '角色设定' && characterName) {
+        await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
+      }
+      const { rows } = await client.query(
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, folder, used, '新上传素材，等待补充备注。'],
+      );
+      for (const tag of tags.length ? tags : ['待整理']) {
+        const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
+        await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [rows[0].id, tagRow.rows[0].id]);
+      }
+      for (const parentId of parentIds) {
+        await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, userId]);
+      }
+      await client.query('COMMIT');
+      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
+      return await hydrateAsset(hydrated.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    if (deleteObjectsOnFailure) await Promise.all([deleteObject(objectKey).catch(() => {}), deleteObject(thumbKey).catch(() => {})]);
+    throw error;
+  }
+}
+
 async function hydrateAsset(row) {
   const [url, thumbUrl] = await Promise.all([
     row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream`) : objectUrl(row.object_key),
@@ -934,64 +994,108 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
   let tempPath = req.file && req.file.path;
   try {
     if (!req.file) return res.status(400).json({ error: '请选择文件' });
-    const type = req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : '';
+    const type = assetTypeFromMime(req.file.mimetype);
     if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
-    const tags = parseTags(req.body.tags);
-    const source = String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入';
-    const sourceUrl = String(req.body.sourceUrl || '').trim().slice(0, 2000);
-    const characterName = String(req.body.characterName || '').trim().slice(0, 120);
-    const requestedFolder = String(req.body.folder || '灵感收集').trim();
-    const folder = (requestedFolder === '成片' ? '我的创作' : requestedFolder).slice(0, 80) || '灵感收集';
-    const characterCategory = String(req.body.characterCategory || '').trim().slice(0, 40);
     const name = safeName(String(req.body.name || path.basename(req.file.originalname, path.extname(req.file.originalname))));
     const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
     await putObject(objectKey, tempPath, req.file.mimetype);
-    let thumbKey = null;
-    let durationSeconds = null;
-    if (type === 'video') {
-      const previewPath = `${tempPath}.jpg`;
-      try {
-        durationSeconds = await inspectVideo(tempPath, previewPath);
-        thumbKey = `${objectKey}.jpg`;
-        await putObject(thumbKey, previewPath, 'image/jpeg');
-      } catch (error) {
-        console.warn('Video preview generation skipped:', error.message);
-      } finally {
-        await fsp.unlink(previewPath).catch(() => {});
-      }
+    const asset = await ingestAsset({
+      userId: req.user.id,
+      tempPath,
+      objectKey,
+      type,
+      name,
+      source: String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入',
+      sourceUrl: String(req.body.sourceUrl || '').trim().slice(0, 2000),
+      characterName: String(req.body.characterName || '').trim().slice(0, 120),
+      characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
+      folder: (String(req.body.folder || '灵感收集').trim() === '成片' ? '我的创作' : String(req.body.folder || '灵感收集').trim()).slice(0, 80) || '灵感收集',
+      used: req.body.used === 'true',
+      tags: parseTags(req.body.tags),
+      parentIds: parseTags(req.body.parentAssetIds),
+      mimeType: req.file.mimetype,
+      sizeBytes: req.file.size,
+      deleteObjectsOnFailure: false,
+    });
+    res.status(201).json({ asset });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.post('/api/assets/upload-ticket', requireUser, async (req, res, next) => {
+  try {
+    const originalName = safeName(String(req.body.filename || '')).slice(0, 200);
+    const mimeType = String(req.body.contentType || '').trim().slice(0, 120);
+    const type = assetTypeFromMime(mimeType);
+    if (!originalName || originalName === '未命名素材' || !type) return res.status(415).json({ error: '仅支持图片和视频文件' });
+    const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${originalName}`;
+    const url = await new Promise((resolve, reject) => {
+      cos.getObjectUrl({
+        Bucket: bucket,
+        Region: region,
+        Key: objectKey,
+        Method: 'PUT',
+        Sign: true,
+        Expires: 600,
+        Headers: { 'Content-Type': mimeType },
+      }, (error, data) => {
+        if (error || !data?.Url) reject(error || new Error('生成上传地址失败'));
+        else resolve(data.Url);
+      });
+    });
+    res.json({ objectKey, url, contentType: mimeType, expiresIn: 600 });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const directUploadKeyPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(image|video)\/\d{4}-\d{2}-\d{2}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-.+$/i;
+
+app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
+  let tempPath;
+  try {
+    const objectKey = String(req.body.objectKey || '').trim();
+    if (!directUploadKeyPattern.test(objectKey) || !objectKey.startsWith(`${req.user.id}/`)) {
+      return res.status(400).json({ error: '上传对象无效' });
     }
-    const sha256 = await hashFile(tempPath);
-    const client = await pool.connect();
+    let metadata;
     try {
-      await client.query('BEGIN');
-      if (folder === '角色设定' && characterName) {
-        await client.query(
-          'INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING',
-          [req.user.id, characterName],
-        );
-      }
-      const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [req.user.id, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, folder, req.body.used === 'true', '新上传素材，等待补充备注。'],
-      );
-      for (const tag of tags.length ? tags : ['待整理']) {
-        const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [req.user.id, tag]);
-        await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [rows[0].id, tagRow.rows[0].id]);
-      }
-      const parentIds = parseTags(req.body.parentAssetIds);
-      for (const parentId of parentIds) {
-        await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, req.user.id]);
-      }
-      await client.query('COMMIT');
-      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
-      res.status(201).json({ asset: await hydrateAsset(hydrated.rows[0]) });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      metadata = await headObject(objectKey);
+    } catch (_) {
+      return res.status(404).json({ error: '上传的对象不存在，请重试上传' });
     }
+    const mimeType = String(metadata.headers?.['content-type'] || '').split(';')[0].trim();
+    const type = assetTypeFromMime(mimeType);
+    const sizeBytes = Number(metadata.headers?.['content-length'] || 0);
+    if (!type) return res.status(415).json({ error: '上传的内容类型不受支持' });
+    if (!sizeBytes || sizeBytes > Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024)) {
+      return res.status(400).json({ error: '上传的文件大小无效或超过限制' });
+    }
+    const originalName = path.basename(objectKey).replace(/^[0-9a-f-]{36}-/i, '');
+    tempPath = path.join(uploadDir, `${crypto.randomUUID()}-${safeName(originalName)}`);
+    await downloadObject(objectKey, tempPath);
+    const asset = await ingestAsset({
+      userId: req.user.id,
+      tempPath,
+      objectKey,
+      type,
+      name: safeName(String(req.body.name || path.basename(originalName, path.extname(originalName)))),
+      source: String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入',
+      sourceUrl: String(req.body.sourceUrl || '').trim().slice(0, 2000),
+      characterName: String(req.body.characterName || '').trim().slice(0, 120),
+      characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
+      folder: (String(req.body.folder || '灵感收集').trim() === '成片' ? '我的创作' : String(req.body.folder || '灵感收集').trim()).slice(0, 80) || '灵感收集',
+      used: req.body.used === true || req.body.used === 'true',
+      tags: parseTags(req.body.tags),
+      parentIds: parseTags(req.body.parentAssetIds),
+      mimeType,
+      sizeBytes,
+      deleteObjectsOnFailure: true,
+    });
+    res.status(201).json({ asset });
   } catch (error) {
     next(error);
   } finally {
