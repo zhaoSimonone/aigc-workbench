@@ -29,18 +29,63 @@ function putObject(key, filePath, contentType) {
   });
 }
 
-async function generatePreview(input, output) {
-  const [{ stdout }] = await Promise.all([
-    execFileAsync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input], { timeout: 60000 }),
-    execFileAsync(ffmpegPath, ['-y', '-i', input, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', output], { timeout: 120000 }),
-  ]);
+async function readVideoDuration(input) {
+  const { stdout } = await execFileAsync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input], { timeout: 60000 });
   const duration = Number.parseFloat(String(stdout).trim());
   return Number.isFinite(duration) && duration > 0 ? duration : null;
 }
 
+function scoreGrayFrame(buffer) {
+  if (!buffer || !buffer.length) return { mean: 0, std: 0 };
+  let sum = 0;
+  for (const value of buffer) sum += value;
+  const mean = sum / buffer.length;
+  let variance = 0;
+  for (const value of buffer) variance += (value - mean) ** 2;
+  return { mean, std: Math.sqrt(variance / buffer.length) };
+}
+
+async function extractGrayFrame(input, seek) {
+  const { stdout } = await execFileAsync(ffmpegPath, ['-ss', String(seek), '-i', input, '-frames:v', '1', '-vf', 'scale=32:32', '-pix_fmt', 'gray', '-f', 'rawvideo', '-'], { timeout: 30000, maxBuffer: 1024 * 1024, encoding: 'buffer' });
+  return stdout;
+}
+
+async function pickPreviewTime(input, duration) {
+  const limit = Math.max(0, duration - 0.05);
+  const fractions = [0.02, 0.08, 0.15, 0.25, 0.35, 0.5, 0.65, 0.8];
+  const seen = new Set();
+  let best = null;
+  for (const fraction of fractions) {
+    const seek = Math.round(Math.min(duration * fraction, limit) * 100) / 100;
+    if (seen.has(seek)) continue;
+    seen.add(seek);
+    let scored;
+    try {
+      scored = scoreGrayFrame(await extractGrayFrame(input, seek));
+    } catch (_) {
+      continue;
+    }
+    if (!best || scored.std > best.std) best = { seek, ...scored };
+    if (scored.std >= 16 && scored.mean >= 18 && scored.mean <= 238) return seek;
+  }
+  return best ? best.seek : 0;
+}
+
+async function generatePreview(input, output) {
+  const duration = await readVideoDuration(input);
+  const seek = duration && duration > 0.2 ? await pickPreviewTime(input, duration) : 0;
+  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', input, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', output], { timeout: 120000 });
+  return duration;
+}
+
 async function main() {
-  const { rows } = await pool.query("SELECT id, object_key FROM assets WHERE type='video' AND thumb_key IS NULL AND deleted_at IS NULL ORDER BY created_at ASC");
-  console.log(`Found ${rows.length} video(s) without previews`);
+  const regenerate = process.argv.includes('--regenerate');
+  const { rows } = await pool.query(
+    regenerate
+      ? "SELECT id, object_key FROM assets WHERE type='video' AND deleted_at IS NULL ORDER BY created_at ASC"
+      : "SELECT id, object_key FROM assets WHERE type='video' AND thumb_key IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
+  );
+  console.log(`${regenerate ? 'Regenerating' : 'Found'} ${rows.length} video(s)${regenerate ? ' (all previews)' : ' without previews'}`);
   for (const row of rows) {
     const base = path.join(os.tmpdir(), `aigc-backfill-${crypto.randomUUID()}`);
     const input = `${base}.video`;
