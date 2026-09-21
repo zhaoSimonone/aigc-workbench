@@ -862,6 +862,49 @@ button {
   background: #7fd8b8;
   transition: width 0.15s linear;
 }
+.upload-progress {
+  margin-top: 14px;
+  display: grid;
+  gap: 6px;
+}
+.upload-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+.upload-progress-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2e3433;
+}
+.upload-progress-meta {
+  flex-shrink: 0;
+  color: #929a96;
+  font-family: "DM Mono", monospace;
+}
+.upload-progress-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: #ecebe6;
+  overflow: hidden;
+}
+.upload-progress-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #2e6f5e;
+  transition: width 0.15s linear;
+}
+.upload-progress-bar i.pulsing {
+  animation: upload-pulse 1s ease-in-out infinite;
+}
+@keyframes upload-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
 .album-create-modal {
   width: min(520px, 100%);
 }
