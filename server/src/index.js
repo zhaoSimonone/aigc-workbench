@@ -130,13 +130,55 @@ function hashFile(filePath) {
   });
 }
 
-async function inspectVideo(filePath, previewPath) {
-  const [{ stdout: durationOutput }] = await Promise.all([
-    execFileAsync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 60000 }),
-    execFileAsync(ffmpegPath, ['-y', '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 }),
-  ]);
-  const duration = Number.parseFloat(String(durationOutput).trim());
+async function readVideoDuration(filePath) {
+  const { stdout } = await execFileAsync(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 60000 });
+  const duration = Number.parseFloat(String(stdout).trim());
   return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+function scoreGrayFrame(buffer) {
+  if (!buffer || !buffer.length) return { mean: 0, std: 0 };
+  let sum = 0;
+  for (const value of buffer) sum += value;
+  const mean = sum / buffer.length;
+  let variance = 0;
+  for (const value of buffer) variance += (value - mean) ** 2;
+  return { mean, std: Math.sqrt(variance / buffer.length) };
+}
+
+async function extractGrayFrame(filePath, seek) {
+  const { stdout } = await execFileAsync(ffmpegPath, ['-ss', String(seek), '-i', filePath, '-frames:v', '1', '-vf', 'scale=32:32', '-pix_fmt', 'gray', '-f', 'rawvideo', '-'], { timeout: 30000, maxBuffer: 1024 * 1024, encoding: 'buffer' });
+  return stdout;
+}
+
+async function pickPreviewTime(filePath, duration) {
+  // 按时间顺序采样候选帧，跳过黑场/纯色/过曝画面，返回最早的“有内容”帧的时间点；
+  // 全部候选都不可用时退回方差最大的一帧
+  const limit = Math.max(0, duration - 0.05);
+  const fractions = [0.02, 0.08, 0.15, 0.25, 0.35, 0.5, 0.65, 0.8];
+  const seen = new Set();
+  let best = null;
+  for (const fraction of fractions) {
+    const seek = Math.round(Math.min(duration * fraction, limit) * 100) / 100;
+    if (seen.has(seek)) continue;
+    seen.add(seek);
+    let scored;
+    try {
+      scored = scoreGrayFrame(await extractGrayFrame(filePath, seek));
+    } catch (_) {
+      continue;
+    }
+    if (!best || scored.std > best.std) best = { seek, ...scored };
+    if (scored.std >= 16 && scored.mean >= 18 && scored.mean <= 238) return seek;
+  }
+  return best ? best.seek : 0;
+}
+
+async function inspectVideo(filePath, previewPath) {
+  const duration = await readVideoDuration(filePath);
+  const seek = duration && duration > 0.2 ? await pickPreviewTime(filePath, duration) : 0;
+  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
+  return duration;
 }
 
 function parseTags(value) {
