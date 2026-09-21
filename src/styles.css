@@ -812,6 +812,56 @@ button {
   font-size: 12px;
   text-align: center;
 }
+.download-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  align-items: center;
+  width: min(340px, calc(100vw - 40px));
+  padding: 12px 14px;
+  border-radius: 10px;
+  color: #fff;
+  background: rgba(24, 28, 28, 0.92);
+  box-shadow: 0 10px 30px rgba(24, 28, 28, 0.3);
+  font-size: 12px;
+}
+.download-toast svg {
+  grid-row: span 2;
+}
+.download-toast-info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.download-toast-info strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.download-toast-info span {
+  color: rgba(255, 255, 255, 0.72);
+  font: 11px "DM Mono", monospace;
+}
+.download-toast-bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+.download-toast-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #7fd8b8;
+  transition: width 0.15s linear;
+}
 .album-create-modal {
   width: min(520px, 100%);
 }
