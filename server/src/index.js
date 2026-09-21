@@ -879,14 +879,18 @@ app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
     const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
     const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
     const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-    // 302 到预签名 COS 直链，绕过本机带宽中转；签名覆盖 response-content-disposition 以强制浏览器下载
+    // 302 到预签名 COS 直链，绕过本机带宽中转；签名覆盖 response-content-disposition 以强制浏览器下载，
+    // 并把类型覆盖为 octet-stream，避免移动端浏览器把视频嗅探进“边下边播”通道
     cos.getObjectUrl({
       Bucket: bucket,
       Region: region,
       Key: row.object_key,
       Sign: true,
       Expires: 300,
-      Query: { 'response-content-disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}` },
+      Query: {
+        'response-content-disposition': `attachment; filename="download"; filename*=UTF-8''${encodedFilename}`,
+        'response-content-type': 'application/octet-stream',
+      },
     }, (error, data) => {
       if (error) return next(error);
       res.redirect(302, data.Url);
