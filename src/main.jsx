@@ -783,7 +783,15 @@ function Workspace({ user, onLogout }) {
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     } catch (error) {
+      // 桶未配置 CORS 等情况下 blob 读取失败时，回退为浏览器直链下载
+      setDownloadProgress(null);
+      try {
+        const { url } = await apiFetch(`/assets/${asset.id}/download-url`);
+        window.location.assign(url);
+        return;
+      } catch {}
       setLoadError(error.message || "下载失败，请稍后重试");
+      return;
     } finally {
       setDownloadProgress(null);
     }
