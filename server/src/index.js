@@ -577,9 +577,38 @@ function publicVideoAccount(row) {
     accountName: row.account_name,
     profileUrl: row.profile_url,
     note: row.note,
+    links: Array.isArray(row.links) ? row.links : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normaliseAccountLinks(value) {
+  if (!Array.isArray(value)) throw new Error('账号链接列表无效');
+  const links = [];
+  const seen = new Set();
+  for (const item of value.slice(0, 8)) {
+    const platform = String(item?.platform || '其他').trim().slice(0, 40) || '其他';
+    const url = validateProfileUrl(item?.url);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push({ platform, url });
+  }
+  if (!links.length) throw new Error('至少填写一个平台链接');
+  return links;
+}
+
+async function assertAccountLinksFree(userId, links, selfId) {
+  const { rows } = await pool.query('SELECT id, profile_url, links FROM video_accounts WHERE user_id=$1', [userId]);
+  const owners = new Map();
+  for (const row of rows) {
+    owners.set(String(row.profile_url || ''), row.id);
+    for (const link of Array.isArray(row.links) ? row.links : []) owners.set(String(link.url || ''), row.id);
+  }
+  for (const link of links) {
+    const owner = owners.get(link.url);
+    if (owner && owner !== selfId) throw new Error('这个关注链接已经收藏过了');
+  }
 }
 
 function validateProfileUrl(value) {
@@ -681,7 +710,7 @@ async function replacePromptLinks(client, promptId, userId, links) {
 app.get('/api/video-accounts', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, platform, account_name, profile_url, note, created_at, updated_at
+      `SELECT id, platform, account_name, profile_url, note, links, created_at, updated_at
          FROM video_accounts
         WHERE user_id=$1
         ORDER BY created_at DESC`,
@@ -695,19 +724,21 @@ app.get('/api/video-accounts', requireUser, async (req, res, next) => {
 
 app.post('/api/video-accounts', requireUser, async (req, res, next) => {
   try {
-    const platform = String(req.body.platform || '其他').trim().slice(0, 40) || '其他';
+    const links = normaliseAccountLinks(
+      Array.isArray(req.body.links) ? req.body.links : [{ platform: req.body.platform, url: req.body.profileUrl }],
+    );
     const accountName = String(req.body.accountName || '').trim().slice(0, 120);
-    const profileUrl = validateProfileUrl(req.body.profileUrl);
     const note = String(req.body.note || '').trim().slice(0, 2000);
+    await assertAccountLinksFree(req.user.id, links, null);
     const { rows } = await pool.query(
-      `INSERT INTO video_accounts(user_id, platform, account_name, profile_url, note)
-       VALUES($1,$2,$3,$4,$5)
-       RETURNING id, platform, account_name, profile_url, note, created_at, updated_at`,
-      [req.user.id, platform, accountName, profileUrl, note],
+      `INSERT INTO video_accounts(user_id, platform, account_name, profile_url, note, links)
+       VALUES($1,$2,$3,$4,$5,$6::jsonb)
+       RETURNING id, platform, account_name, profile_url, note, links, created_at, updated_at`,
+      [req.user.id, links[0].platform, accountName, links[0].url, note, JSON.stringify(links)],
     );
     res.status(201).json({ account: publicVideoAccount(rows[0]) });
   } catch (error) {
-    if (error.message === '请输入有效的账号关注链接' || error.message === '账号链接必须是 HTTP(S) 地址') return res.status(400).json({ error: error.message });
+    if (['账号链接列表无效', '至少填写一个平台链接', '请输入有效的账号关注链接', '账号链接必须是 HTTP(S) 地址', '这个关注链接已经收藏过了'].includes(error.message)) return res.status(400).json({ error: error.message });
     if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
     next(error);
   }
@@ -715,37 +746,35 @@ app.post('/api/video-accounts', requireUser, async (req, res, next) => {
 
 app.patch('/api/video-accounts/:id', requireUser, async (req, res, next) => {
   try {
-    const fields = [];
-    const values = [];
-    if (Object.prototype.hasOwnProperty.call(req.body, 'platform')) {
-      values.push(String(req.body.platform || '其他').trim().slice(0, 40) || '其他');
-      fields.push(`platform=$${values.length}`);
+    const { rows: existingRows } = await pool.query('SELECT * FROM video_accounts WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+    if (!existingRows[0]) return res.status(404).json({ error: '视频账号不存在' });
+    const existing = existingRows[0];
+    const updates = {};
+    if (Object.prototype.hasOwnProperty.call(req.body, 'links') || Object.prototype.hasOwnProperty.call(req.body, 'profileUrl') || Object.prototype.hasOwnProperty.call(req.body, 'platform')) {
+      const hasLinks = Array.isArray(req.body.links);
+      const links = hasLinks
+        ? normaliseAccountLinks(req.body.links)
+        : normaliseAccountLinks([{ platform: Object.prototype.hasOwnProperty.call(req.body, 'platform') ? req.body.platform : existing.platform, url: Object.prototype.hasOwnProperty.call(req.body, 'profileUrl') ? req.body.profileUrl : existing.profile_url }]);
+      await assertAccountLinksFree(req.user.id, links, existing.id);
+      updates.platform = links[0].platform;
+      updates.profile_url = links[0].url;
+      updates.links = JSON.stringify(links);
     }
-    if (Object.prototype.hasOwnProperty.call(req.body, 'accountName')) {
-      values.push(String(req.body.accountName || '').trim().slice(0, 120));
-      fields.push(`account_name=$${values.length}`);
-    }
-    if (Object.prototype.hasOwnProperty.call(req.body, 'profileUrl')) {
-      values.push(validateProfileUrl(req.body.profileUrl));
-      fields.push(`profile_url=$${values.length}`);
-    }
-    if (Object.prototype.hasOwnProperty.call(req.body, 'note')) {
-      values.push(String(req.body.note || '').trim().slice(0, 2000));
-      fields.push(`note=$${values.length}`);
-    }
-    if (!fields.length) return res.status(400).json({ error: '没有可更新字段' });
-    fields.push('updated_at=now()');
-    values.push(req.params.id, req.user.id);
+    if (Object.prototype.hasOwnProperty.call(req.body, 'accountName')) updates.account_name = String(req.body.accountName || '').trim().slice(0, 120);
+    if (Object.prototype.hasOwnProperty.call(req.body, 'note')) updates.note = String(req.body.note || '').trim().slice(0, 2000);
+    if (!Object.keys(updates).length) return res.status(400).json({ error: '没有可更新字段' });
+    const fields = Object.entries(updates).map(([column, value], index) => `${column}=$${index + 1}${column === 'links' ? '::jsonb' : ''}`);
+    const values = [...Object.values(updates), req.params.id, req.user.id];
     const { rows } = await pool.query(
-      `UPDATE video_accounts SET ${fields.join(', ')}
+      `UPDATE video_accounts SET ${fields.join(', ')}, updated_at=now()
         WHERE id=$${values.length - 1} AND user_id=$${values.length}
-        RETURNING id, platform, account_name, profile_url, note, created_at, updated_at`,
+        RETURNING id, platform, account_name, profile_url, note, links, created_at, updated_at`,
       values,
     );
     if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
     res.json({ account: publicVideoAccount(rows[0]) });
   } catch (error) {
-    if (error.message === '请输入有效的账号关注链接' || error.message === '账号链接必须是 HTTP(S) 地址') return res.status(400).json({ error: error.message });
+    if (['账号链接列表无效', '至少填写一个平台链接', '请输入有效的账号关注链接', '账号链接必须是 HTTP(S) 地址', '这个关注链接已经收藏过了'].includes(error.message)) return res.status(400).json({ error: error.message });
     if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
     next(error);
   }

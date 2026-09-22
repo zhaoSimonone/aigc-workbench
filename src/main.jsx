@@ -2085,67 +2085,97 @@ function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
   }
   return (
     <div className="video-account-grid">
-      {accounts.map((account) => (
-        <article className="video-account-card" key={account.id}>
-          <div className="video-account-card-head">
-            <span className="video-account-platform"><Users size={14} />{account.platform}</span>
-            <div className="video-account-actions">
-              <button onClick={() => onEdit(account)} aria-label={`编辑${account.accountName || account.platform}`} title="编辑">
-                <Pencil size={15} />
-              </button>
-              <button className="video-account-delete" onClick={() => onDelete(account)} aria-label={`取消收藏${account.accountName || account.platform}`} title="取消收藏">
-                <Trash2 size={15} />
-              </button>
+      {accounts.map((account) => {
+        const links = account.links?.length
+          ? account.links
+          : [{ platform: account.platform, url: account.profileUrl }];
+        return (
+          <article className="video-account-card" key={account.id}>
+            <div className="video-account-card-head">
+              <div className="video-account-platforms">
+                {links.map((link, index) => (
+                  <a
+                    key={index}
+                    className="video-account-platform"
+                    href={link.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`打开${link.platform}主页`}
+                  >
+                    <Users size={13} />{link.platform}
+                  </a>
+                ))}
+              </div>
+              <div className="video-account-actions">
+                <button onClick={() => onEdit(account)} aria-label={`编辑${account.accountName || account.platform}`} title="编辑">
+                  <Pencil size={15} />
+                </button>
+                <button className="video-account-delete" onClick={() => onDelete(account)} aria-label={`取消收藏${account.accountName || account.platform}`} title="取消收藏">
+                  <Trash2 size={15} />
+                </button>
+              </div>
             </div>
-          </div>
-          <div className="video-account-name-row">
-            <h3>{account.accountName || "未命名账号"}</h3>
-            <a
-              className="video-account-open"
-              href={account.profileUrl}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={`打开${account.accountName || account.platform}主页`}
-              title="打开主页"
-            >
-              <ExternalLink size={15} />
-            </a>
-          </div>
-          {account.note ? <p className="video-account-note">{account.note}</p> : <p className="video-account-note muted">暂无备注</p>}
-          <div className="video-account-meta">
-            <span>收藏于 {formatAccountDate(account.createdAt)}</span>
-          </div>
-        </article>
-      ))}
+            <div className="video-account-name-row">
+              <h3>{account.accountName || "未命名账号"}</h3>
+              <a
+                className="video-account-open"
+                href={links[0].url}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`打开${account.accountName || account.platform}主页`}
+                title={`打开${links[0].platform}主页`}
+              >
+                <ExternalLink size={15} />
+              </a>
+            </div>
+            {account.note ? <p className="video-account-note">{account.note}</p> : <p className="video-account-note muted">暂无备注</p>}
+            <div className="video-account-meta">
+              <span>收藏于 {formatAccountDate(account.createdAt)}</span>
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }
 
 function VideoAccountModal({ account, onClose, onSave }) {
-  const [platform, setPlatform] = useState(account?.platform || VIDEO_ACCOUNT_PLATFORMS[0]);
+  const [links, setLinks] = useState(() => {
+    const existing = account?.links?.length
+      ? account.links
+      : account?.profileUrl
+        ? [{ platform: account.platform, url: account.profileUrl }]
+        : [];
+    return existing.length ? existing : [{ platform: VIDEO_ACCOUNT_PLATFORMS[0], url: "" }];
+  });
   const [accountName, setAccountName] = useState(account?.accountName || "");
-  const [profileUrl, setProfileUrl] = useState(account?.profileUrl || "");
   const [note, setNote] = useState(account?.note || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const updateLink = (index, patch) =>
+    setLinks((items) => items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
   const submit = async (event) => {
     event.preventDefault();
-    const url = profileUrl.trim();
-    if (!url) {
-      setError("请输入关注链接");
+    const cleaned = links
+      .map((link) => ({ platform: link.platform || "其他", url: String(link.url || "").trim() }))
+      .filter((link) => link.url);
+    if (!cleaned.length) {
+      setError("请至少填写一个平台链接");
       return;
     }
-    try {
-      const parsed = new URL(url);
-      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
-    } catch (_) {
-      setError("请输入有效的 HTTP(S) 关注链接");
-      return;
+    for (const link of cleaned) {
+      try {
+        const parsed = new URL(link.url);
+        if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+      } catch (_) {
+        setError("请输入有效的 HTTP(S) 关注链接");
+        return;
+      }
     }
     setSaving(true);
     setError("");
     try {
-      await onSave({ platform, accountName: accountName.trim(), profileUrl: url, note: note.trim() });
+      await onSave({ accountName: accountName.trim(), note: note.trim(), links: cleaned });
     } catch (saveError) {
       setError(saveError.message || "保存失败，请稍后重试");
     } finally {
@@ -2159,26 +2189,53 @@ function VideoAccountModal({ account, onClose, onSave }) {
           <div>
             <p className="eyebrow">{account ? "EDIT VIDEO ACCOUNT" : "NEW VIDEO ACCOUNT"}</p>
             <h2>{account ? "编辑视频账号" : "收藏视频账号"}</h2>
-            <p className="modal-subtitle">保存账号主页链接，之后可以从这里快速回到原平台。</p>
+            <p className="modal-subtitle">保存账号主页链接，同一账号可以关联多个平台的关注链接。</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
         </div>
         <div className="edit-form-grid video-account-form">
           <label>
-            平台
-            <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
-              {VIDEO_ACCOUNT_PLATFORMS.map((item) => <option key={item}>{item}</option>)}
-            </select>
-          </label>
-          <label>
             账号名称 <small>可选</small>
             <input value={accountName} onChange={(event) => setAccountName(event.target.value)} placeholder="例如 摄影师 Alex" />
           </label>
-          <label className="edit-field-wide">
-            关注链接
-            <input type="url" required value={profileUrl} onChange={(event) => setProfileUrl(event.target.value)} placeholder="https://www.douyin.com/user/..." />
-            <small>填写账号主页地址，而不是单条视频地址</small>
-          </label>
+          <div className="account-links-editor">
+            <div className="account-links-head">
+              <span>平台链接</span>
+              <button
+                type="button"
+                className="text-button"
+                disabled={links.length >= 8}
+                onClick={() => setLinks((items) => [...items, { platform: VIDEO_ACCOUNT_PLATFORMS[0], url: "" }])}
+              >
+                <Plus size={13} />添加平台
+              </button>
+            </div>
+            {links.map((link, index) => (
+              <div className="account-link-row" key={index}>
+                <select value={link.platform} onChange={(event) => updateLink(index, { platform: event.target.value })}>
+                  {VIDEO_ACCOUNT_PLATFORMS.map((item) => <option key={item}>{item}</option>)}
+                </select>
+                <input
+                  type="url"
+                  value={link.url}
+                  onChange={(event) => updateLink(index, { url: event.target.value })}
+                  placeholder={index === 0 ? "https://www.douyin.com/user/..." : "https://..." }
+                />
+                {links.length > 1 && (
+                  <button
+                    type="button"
+                    className="account-link-remove"
+                    aria-label="删除这条链接"
+                    title="删除这条链接"
+                    onClick={() => setLinks((items) => items.filter((_, i) => i !== index))}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+            ))}
+            <small className="account-links-hint">填写账号主页地址，而不是单条视频地址；第一个平台会作为账号的主平台展示。</small>
+          </div>
           <label className="edit-field-wide">
             备注 <small>可选</small>
             <textarea value={note} onChange={(event) => setNote(event.target.value)} rows="4" placeholder="记录账号的内容方向、值得关注的原因等" />
