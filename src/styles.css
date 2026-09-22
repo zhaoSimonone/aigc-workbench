@@ -1071,8 +1071,8 @@ button {
 }
 .video-account-avatar {
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
   object-fit: cover;
 }
@@ -1081,7 +1081,7 @@ button {
   place-items: center;
   background: #ecebe6;
   color: #7d847f;
-  font-size: 17px;
+  font-size: 26px;
   font-weight: 700;
 }
 .account-avatar-editor {
