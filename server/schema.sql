@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS video_accounts (
 );
 ALTER TABLE video_accounts ADD COLUMN IF NOT EXISTS links JSONB NOT NULL DEFAULT '[]';
 UPDATE video_accounts SET links = jsonb_build_array(jsonb_build_object('platform', platform, 'url', profile_url)) WHERE links = '[]'::jsonb;
+ALTER TABLE video_accounts ADD COLUMN IF NOT EXISTS avatar_key TEXT;
 CREATE INDEX IF NOT EXISTS video_accounts_user_idx ON video_accounts(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS prompts (
