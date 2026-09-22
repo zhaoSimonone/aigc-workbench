@@ -1067,12 +1067,12 @@ button {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  margin: 20px 0 10px;
+  margin: 14px 0 8px;
 }
 .video-account-avatar {
   flex-shrink: 0;
-  width: 64px;
-  height: 64px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   object-fit: cover;
 }
@@ -1081,7 +1081,7 @@ button {
   place-items: center;
   background: #ecebe6;
   color: #7d847f;
-  font-size: 26px;
+  font-size: 20px;
   font-weight: 700;
 }
 .account-avatar-editor {
