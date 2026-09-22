@@ -2116,6 +2116,9 @@ function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
               </div>
             </div>
             <div className="video-account-name-row">
+              {account.avatarUrl
+                ? <img className="video-account-avatar" src={account.avatarUrl} alt="" />
+                : <span className="video-account-avatar placeholder">{(account.accountName || "账").slice(0, 1)}</span>}
               <h3>{account.accountName || "未命名账号"}</h3>
               <a
                 className="video-account-open"
@@ -2150,10 +2153,31 @@ function VideoAccountModal({ account, onClose, onSave }) {
   });
   const [accountName, setAccountName] = useState(account?.accountName || "");
   const [note, setNote] = useState(account?.note || "");
+  const [avatar, setAvatar] = useState({ key: "", url: account?.avatarUrl || "" });
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const avatarInput = useRef(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const updateLink = (index, patch) =>
     setLinks((items) => items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+  const pickAvatar = () => avatarInput.current?.click();
+  const onAvatarPicked = async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    setAvatarUploading(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const payload = await apiFetch("/video-accounts/avatar-upload", { method: "POST", body: form });
+      setAvatar({ key: payload.avatarKey, url: payload.avatarUrl });
+    } catch (uploadError) {
+      setError(uploadError.message || "头像上传失败，请稍后重试");
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
   const submit = async (event) => {
     event.preventDefault();
     const cleaned = links
@@ -2175,7 +2199,9 @@ function VideoAccountModal({ account, onClose, onSave }) {
     setSaving(true);
     setError("");
     try {
-      await onSave({ accountName: accountName.trim(), note: note.trim(), links: cleaned });
+      const fields = { accountName: accountName.trim(), note: note.trim(), links: cleaned };
+      if (avatar.key) fields.avatarKey = avatar.key;
+      await onSave(fields);
     } catch (saveError) {
       setError(saveError.message || "保存失败，请稍后重试");
     } finally {
@@ -2192,6 +2218,19 @@ function VideoAccountModal({ account, onClose, onSave }) {
             <p className="modal-subtitle">保存账号主页链接，同一账号可以关联多个平台的关注链接。</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+        </div>
+        <div className="account-avatar-editor">
+          {avatar.url
+            ? <img className="account-avatar-preview" src={avatar.url} alt="头像预览" />
+            : <span className="account-avatar-preview placeholder"><Users size={22} /></span>}
+          <div className="account-avatar-info">
+            <strong>账号头像 <small>可选</small></strong>
+            <span>支持 JPG / PNG / WebP，最大 5MB，自动裁剪为正方形</span>
+            <button type="button" className="text-button" onClick={pickAvatar} disabled={avatarUploading}>
+              {avatarUploading ? "上传中…" : avatar.url ? "更换头像" : "选择图片"}
+            </button>
+          </div>
+          <input ref={avatarInput} type="file" accept="image/*" hidden onChange={onAvatarPicked} />
         </div>
         <div className="edit-form-grid video-account-form">
           <label className="edit-field-wide">

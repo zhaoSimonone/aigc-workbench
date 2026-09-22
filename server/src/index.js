@@ -41,6 +41,7 @@ const upload = multer({
   dest: uploadDir,
   limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024) },
 });
+const avatarUpload = multer({ dest: uploadDir, limits: { fileSize: 5 * 1024 * 1024 } });
 
 function hashToken(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -578,9 +579,24 @@ function publicVideoAccount(row) {
     profileUrl: row.profile_url,
     note: row.note,
     links: Array.isArray(row.links) ? row.links : [],
+    avatarKey: row.avatar_key || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+async function publicVideoAccountWithAvatar(row) {
+  const account = publicVideoAccount(row);
+  account.avatarUrl = row.avatar_key ? await objectUrl(row.avatar_key) : '';
+  return account;
+}
+
+function validAvatarKey(userId, avatarKey) {
+  if (avatarKey === undefined) return true;
+  if (!avatarKey) return true;
+  return typeof avatarKey === 'string'
+    && avatarKey.startsWith(`${userId}/avatars/`)
+    && /^[0-9a-f-]{36}\.jpg$/.test(path.basename(avatarKey));
 }
 
 function normaliseAccountLinks(value) {
@@ -710,15 +726,42 @@ async function replacePromptLinks(client, promptId, userId, links) {
 app.get('/api/video-accounts', requireUser, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, platform, account_name, profile_url, note, links, created_at, updated_at
+      `SELECT id, platform, account_name, profile_url, note, links, avatar_key, created_at, updated_at
          FROM video_accounts
         WHERE user_id=$1
         ORDER BY created_at DESC`,
       [req.user.id],
     );
-    res.json({ accounts: rows.map(publicVideoAccount) });
+    res.json({ accounts: await Promise.all(rows.map(publicVideoAccountWithAvatar)) });
   } catch (error) {
     next(error);
+  }
+});
+
+app.post('/api/video-accounts/avatar-upload', requireUser, (req, res, next) => {
+  avatarUpload.single('file')(req, res, (err) => {
+    if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? '头像不能超过 5MB' : '头像上传失败' });
+    next();
+  });
+}, async (req, res, next) => {
+  let tempPath = req.file && req.file.path;
+  let previewPath;
+  try {
+    if (!req.file) return res.status(400).json({ error: '请选择头像图片' });
+    if (!req.file.mimetype.startsWith('image/')) return res.status(415).json({ error: '仅支持图片文件' });
+    previewPath = `${tempPath}.jpg`;
+    await execFileAsync(ffmpegPath, ['-y', '-i', tempPath, '-vf', 'scale=256:256:force_original_aspect_ratio=increase,crop=256:256', '-frames:v', '1', '-q:v', '4', previewPath], { timeout: 60000 });
+    const avatarKey = `${req.user.id}/avatars/${crypto.randomUUID()}.jpg`;
+    await putObject(avatarKey, previewPath, 'image/jpeg');
+    const avatarUrl = await objectUrl(avatarKey);
+    res.status(201).json({ avatarKey, avatarUrl });
+  } catch (error) {
+    next(error);
+  } finally {
+    await Promise.all([
+      tempPath && fsp.unlink(tempPath).catch(() => {}),
+      previewPath && fsp.unlink(previewPath).catch(() => {}),
+    ]);
   }
 });
 
@@ -729,14 +772,16 @@ app.post('/api/video-accounts', requireUser, async (req, res, next) => {
     );
     const accountName = String(req.body.accountName || '').trim().slice(0, 120);
     const note = String(req.body.note || '').trim().slice(0, 2000);
+    if (!validAvatarKey(req.user.id, req.body.avatarKey)) return res.status(400).json({ error: '头像文件无效' });
     await assertAccountLinksFree(req.user.id, links, null);
+    const avatarKey = validAvatarKey(req.user.id, req.body.avatarKey) ? (req.body.avatarKey || null) : null;
     const { rows } = await pool.query(
-      `INSERT INTO video_accounts(user_id, platform, account_name, profile_url, note, links)
-       VALUES($1,$2,$3,$4,$5,$6::jsonb)
-       RETURNING id, platform, account_name, profile_url, note, links, created_at, updated_at`,
-      [req.user.id, links[0].platform, accountName, links[0].url, note, JSON.stringify(links)],
+      `INSERT INTO video_accounts(user_id, platform, account_name, profile_url, note, links, avatar_key)
+       VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)
+       RETURNING id, platform, account_name, profile_url, note, links, avatar_key, created_at, updated_at`,
+      [req.user.id, links[0].platform, accountName, links[0].url, note, JSON.stringify(links), avatarKey],
     );
-    res.status(201).json({ account: publicVideoAccount(rows[0]) });
+    res.status(201).json({ account: await publicVideoAccountWithAvatar(rows[0]) });
   } catch (error) {
     if (['账号链接列表无效', '至少填写一个平台链接', '请输入有效的账号关注链接', '账号链接必须是 HTTP(S) 地址', '这个关注链接已经收藏过了'].includes(error.message)) return res.status(400).json({ error: error.message });
     if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
@@ -762,17 +807,24 @@ app.patch('/api/video-accounts/:id', requireUser, async (req, res, next) => {
     }
     if (Object.prototype.hasOwnProperty.call(req.body, 'accountName')) updates.account_name = String(req.body.accountName || '').trim().slice(0, 120);
     if (Object.prototype.hasOwnProperty.call(req.body, 'note')) updates.note = String(req.body.note || '').trim().slice(0, 2000);
+    if (Object.prototype.hasOwnProperty.call(req.body, 'avatarKey')) {
+      if (!validAvatarKey(req.user.id, req.body.avatarKey)) return res.status(400).json({ error: '头像文件无效' });
+      updates.avatar_key = req.body.avatarKey || null;
+    }
     if (!Object.keys(updates).length) return res.status(400).json({ error: '没有可更新字段' });
     const fields = Object.entries(updates).map(([column, value], index) => `${column}=$${index + 1}${column === 'links' ? '::jsonb' : ''}`);
     const values = [...Object.values(updates), req.params.id, req.user.id];
     const { rows } = await pool.query(
       `UPDATE video_accounts SET ${fields.join(', ')}, updated_at=now()
         WHERE id=$${values.length - 1} AND user_id=$${values.length}
-        RETURNING id, platform, account_name, profile_url, note, links, created_at, updated_at`,
+        RETURNING id, platform, account_name, profile_url, note, links, avatar_key, created_at, updated_at`,
       values,
     );
     if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
-    res.json({ account: publicVideoAccount(rows[0]) });
+    const oldAvatar = existing.avatar_key;
+    const newAvatar = rows[0].avatar_key;
+    if (oldAvatar && oldAvatar !== newAvatar) deleteObject(oldAvatar).catch((error) => console.warn('Old avatar cleanup skipped:', error.message));
+    res.json({ account: await publicVideoAccountWithAvatar(rows[0]) });
   } catch (error) {
     if (['账号链接列表无效', '至少填写一个平台链接', '请输入有效的账号关注链接', '账号链接必须是 HTTP(S) 地址', '这个关注链接已经收藏过了'].includes(error.message)) return res.status(400).json({ error: error.message });
     if (error.code === '23505') return res.status(409).json({ error: '这个关注链接已经收藏过了' });
@@ -782,8 +834,9 @@ app.patch('/api/video-accounts/:id', requireUser, async (req, res, next) => {
 
 app.delete('/api/video-accounts/:id', requireUser, async (req, res, next) => {
   try {
-    const { rows } = await pool.query('DELETE FROM video_accounts WHERE id=$1 AND user_id=$2 RETURNING id', [req.params.id, req.user.id]);
+    const { rows } = await pool.query('DELETE FROM video_accounts WHERE id=$1 AND user_id=$2 RETURNING id, avatar_key', [req.params.id, req.user.id]);
     if (!rows[0]) return res.status(404).json({ error: '视频账号不存在' });
+    if (rows[0].avatar_key) deleteObject(rows[0].avatar_key).catch((error) => console.warn('Avatar cleanup skipped:', error.message));
     res.status(204).end();
   } catch (error) {
     next(error);
