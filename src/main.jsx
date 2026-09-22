@@ -66,6 +66,26 @@ const PROMPT_LINK_ROLES = [
 const WECHAT_UA = /MicroMessenger/i;
 const BLOB_DOWNLOAD_LIMIT = 300 * 1024 * 1024;
 
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {}
+  try {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    const ok = document.execCommand("copy");
+    input.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 const seedAssets = [
   {
     id: 1,
@@ -776,29 +796,10 @@ function Workspace({ user, onLogout }) {
     });
     setCharacterAlbums((albums) => albums.map((item) => (item.id === payload.album.id ? payload.album : item)));
   };
-  const copyText = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {}
-    try {
-      const input = document.createElement("textarea");
-      input.value = text;
-      input.style.position = "fixed";
-      input.style.opacity = "0";
-      document.body.appendChild(input);
-      input.select();
-      const ok = document.execCommand("copy");
-      input.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  };
   const downloadAsset = async (asset) => {
     if (WECHAT_UA.test(navigator.userAgent)) {
       const link = `${window.location.origin}/api/assets/${asset.id}/download`;
-      const copied = await copyText(link);
+      const copied = await copyTextToClipboard(link);
       window.alert(copied
         ? "微信内无法直接下载文件，下载链接已复制。请点右上角「···」→「在浏览器打开」，在地址栏粘贴并打开链接即可高速下载。"
         : "微信内无法直接下载文件。请点右上角「···」→「在浏览器打开」后，重新点击下载。");
@@ -2173,6 +2174,7 @@ function VideoAccountModal({ account, onClose, onSave }) {
   const [note, setNote] = useState(account?.note || "");
   const [avatar, setAvatar] = useState({ key: "", url: account?.avatarUrl || "" });
   const [avatarUploading, setAvatarUploading] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState(null);
   const avatarInput = useRef(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -2194,6 +2196,13 @@ function VideoAccountModal({ account, onClose, onSave }) {
       setError(uploadError.message || "头像上传失败，请稍后重试");
     } finally {
       setAvatarUploading(false);
+    }
+  };
+  const copyLink = async (index, url) => {
+    const ok = await copyTextToClipboard(url);
+    if (ok) {
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1500);
     }
   };
   const submit = async (event) => {
@@ -2289,6 +2298,16 @@ function VideoAccountModal({ account, onClose, onSave }) {
                 >
                   <ExternalLink size={14} />
                 </a>
+                <button
+                  type="button"
+                  className={`account-link-copy${link.url ? "" : " disabled"}${copiedIndex === index ? " copied" : ""}`}
+                  aria-label="复制这条链接"
+                  title="复制这条链接"
+                  disabled={!link.url}
+                  onClick={() => copyLink(index, link.url)}
+                >
+                  {copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}
+                </button>
                 {links.length > 1 && (
                   <button
                     type="button"

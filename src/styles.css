@@ -989,8 +989,8 @@ button {
 .account-link-row {
   position: relative;
   display: grid;
-  grid-template-columns: 118px minmax(0, 1fr) auto auto;
-  gap: 8px;
+  grid-template-columns: 118px minmax(0, 1fr) auto auto auto;
+  gap: 6px;
   align-items: center;
 }
 .account-link-row input,
@@ -1014,6 +1014,7 @@ button {
   pointer-events: none;
 }
 .account-link-open,
+.account-link-copy,
 .account-link-remove {
   display: inline-flex;
   align-items: center;
@@ -1028,9 +1029,19 @@ button {
   color: #2e6f5e;
   background: #e8f2ee;
 }
-.account-link-open.disabled {
+.account-link-open.disabled,
+.account-link-copy.disabled {
   opacity: 0.35;
   pointer-events: none;
+}
+.account-link-copy:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.account-link-copy.copied,
+.account-link-copy:not(:disabled):hover {
+  color: #2e6f5e;
+  background: #e8f2ee;
 }
 .account-link-remove:hover {
   color: #b3492f;
