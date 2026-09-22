@@ -2194,11 +2194,11 @@ function VideoAccountModal({ account, onClose, onSave }) {
           <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
         </div>
         <div className="edit-form-grid video-account-form">
-          <label>
+          <label className="edit-field-wide">
             账号名称 <small>可选</small>
             <input value={accountName} onChange={(event) => setAccountName(event.target.value)} placeholder="例如 摄影师 Alex" />
           </label>
-          <div className="account-links-editor">
+          <div className="account-links-editor edit-field-wide">
             <div className="account-links-head">
               <span>平台链接</span>
               <button
@@ -2211,7 +2211,7 @@ function VideoAccountModal({ account, onClose, onSave }) {
               </button>
             </div>
             {links.map((link, index) => (
-              <div className="account-link-row" key={index}>
+              <div className={`account-link-row${index === 0 ? " primary" : ""}`} key={index}>
                 <select value={link.platform} onChange={(event) => updateLink(index, { platform: event.target.value })}>
                   {VIDEO_ACCOUNT_PLATFORMS.map((item) => <option key={item}>{item}</option>)}
                 </select>
@@ -2221,6 +2221,17 @@ function VideoAccountModal({ account, onClose, onSave }) {
                   onChange={(event) => updateLink(index, { url: event.target.value })}
                   placeholder={index === 0 ? "https://www.douyin.com/user/..." : "https://..." }
                 />
+                <a
+                  className={`account-link-open${link.url ? "" : " disabled"}`}
+                  href={link.url || undefined}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="打开这条链接"
+                  title="打开这条链接"
+                  onClick={(event) => { if (!link.url) event.preventDefault(); }}
+                >
+                  <ExternalLink size={14} />
+                </a>
                 {links.length > 1 && (
                   <button
                     type="button"
@@ -2232,9 +2243,10 @@ function VideoAccountModal({ account, onClose, onSave }) {
                     <X size={14} />
                   </button>
                 )}
+                {index === 0 && <span className="account-link-primary">主平台</span>}
               </div>
             ))}
-            <small className="account-links-hint">填写账号主页地址，而不是单条视频地址；第一个平台会作为账号的主平台展示。</small>
+            <small className="account-links-hint">填写账号主页地址，而不是单条视频地址；第一个平台作为账号的主平台，调整排序可通过先删后加。</small>
           </div>
           <label className="edit-field-wide">
             备注 <small>可选</small>

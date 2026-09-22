@@ -905,6 +905,14 @@ button {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
+@media (max-width: 760px) {
+  .account-link-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .account-link-row select {
+    grid-column: 1 / -1;
+  }
+}
 .album-create-modal {
   width: min(520px, 100%);
 }
@@ -968,7 +976,7 @@ button {
 }
 .account-links-editor {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
 }
 .account-links-head {
@@ -979,8 +987,9 @@ button {
   font-weight: 600;
 }
 .account-link-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 118px minmax(0, 1fr) auto;
+  grid-template-columns: 118px minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
 }
@@ -988,14 +997,40 @@ button {
 .account-link-row select {
   min-width: 0;
 }
+.account-link-row.primary select {
+  border-color: #2e6f5e;
+  box-shadow: 0 0 0 1px #2e6f5e inset;
+}
+.account-link-primary {
+  position: absolute;
+  top: -7px;
+  left: 9px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #fff;
+  background: #2e6f5e;
+  font-size: 9px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.account-link-open,
 .account-link-remove {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 8px;
+  padding: 9px;
   border-radius: 6px;
   color: #929a96;
   background: #f1f1ee;
+  text-decoration: none;
+}
+.account-link-open:hover {
+  color: #2e6f5e;
+  background: #e8f2ee;
+}
+.account-link-open.disabled {
+  opacity: 0.35;
+  pointer-events: none;
 }
 .account-link-remove:hover {
   color: #b3492f;
