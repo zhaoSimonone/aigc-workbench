@@ -1073,8 +1073,23 @@ button {
   flex-shrink: 0;
   width: 48px;
   height: 48px;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
+  overflow: hidden;
+  cursor: default;
+}
+.video-account-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
   object-fit: cover;
+}
+.video-account-avatar.clickable {
+  cursor: zoom-in;
+}
+.video-account-avatar.clickable:hover {
+  box-shadow: 0 0 0 2px #2e6f5e;
 }
 .video-account-avatar.placeholder {
   display: grid;
@@ -1083,6 +1098,37 @@ button {
   color: #7d847f;
   font-size: 20px;
   font-weight: 700;
+}
+.avatar-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 17, 18, 0.78);
+  cursor: zoom-out;
+}
+.avatar-lightbox img {
+  width: min(320px, 76vw);
+  height: min(320px, 76vw);
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.avatar-lightbox-close {
+  position: absolute;
+  top: 22px;
+  right: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+.avatar-lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.26);
 }
 .account-avatar-editor {
   display: flex;

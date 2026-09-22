@@ -458,6 +458,7 @@ function Workspace({ user, onLogout }) {
   const [downloadProgress, setDownloadProgress] = useState(null);
   const progressTickRef = useRef(0);
   const [uploadProgress, setUploadProgress] = useState(null);
+  const [avatarPreview, setAvatarPreview] = useState(null);
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
@@ -1334,6 +1335,7 @@ function Workspace({ user, onLogout }) {
               onCreate={() => setShowVideoAccountModal(true)}
               onEdit={(account) => setEditingVideoAccount(account)}
               onDelete={deleteVideoAccount}
+              onAvatarPreview={setAvatarPreview}
             />
           ) : isMusicView ? (
             <MusicLibraryPanel
@@ -1621,6 +1623,14 @@ function Workspace({ user, onLogout }) {
           onClose={() => setCoverPickerAlbum(null)}
           onPick={(coverAssetId) => setAlbumCover(coverPickerAlbum.name, coverAssetId)}
         />
+      )}
+      {avatarPreview && (
+        <div className="avatar-lightbox" role="dialog" aria-label="头像预览" onClick={() => setAvatarPreview(null)}>
+          <img src={avatarPreview} alt="头像预览" onClick={(event) => event.stopPropagation()} />
+          <button type="button" className="avatar-lightbox-close" aria-label="关闭预览" onClick={() => setAvatarPreview(null)}>
+            <X size={18} />
+          </button>
+        </div>
       )}
       {downloadProgress && (
         <div className="download-toast" role="status">
@@ -2063,7 +2073,7 @@ function formatPromptDate(value) {
   return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
-function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
+function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete, onAvatarPreview }) {
   if (loading) {
     return (
       <div className="empty-state">
@@ -2117,7 +2127,15 @@ function VideoAccountsPanel({ accounts, loading, onCreate, onEdit, onDelete }) {
             </div>
             <div className="video-account-name-row">
               {account.avatarUrl
-                ? <img className="video-account-avatar" src={account.avatarUrl} alt="" />
+                ? <button
+                    type="button"
+                    className="video-account-avatar clickable"
+                    aria-label={`放大查看${account.accountName || account.platform}的头像`}
+                    title="点击放大头像"
+                    onClick={() => onAvatarPreview?.(account.avatarUrl)}
+                  >
+                    <img src={account.avatarUrl} alt="" />
+                  </button>
                 : <span className="video-account-avatar placeholder">{(account.accountName || "账").slice(0, 1)}</span>}
               <h3>{account.accountName || "未命名账号"}</h3>
               <a
