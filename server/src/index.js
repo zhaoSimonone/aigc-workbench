@@ -1227,28 +1227,20 @@ app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
   }
 });
 
-app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req, res, next) => {
-  let tempPath = req.file && req.file.path;
-  let uploadedKey = '';
-  let uploadedThumbKey = '';
+async function applyAssetFileReplacement({ userId, assetId, current, tempPath, objectKey, mimeType, sizeBytes }) {
+  const type = assetTypeFromMime(mimeType);
+  if (!type) throw Object.assign(new Error('仅支持图片和视频文件'), { statusCode: 415 });
+  if (type !== current.type) {
+    throw Object.assign(new Error(`只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件`), { statusCode: 400 });
+  }
+  let thumbKey = null;
+  let durationSeconds = null;
   try {
-    if (!req.file) return res.status(400).json({ error: '请选择要替换的文件' });
-    const current = await assetQuery(req.params.id, req.user.id);
-    if (!current) return res.status(404).json({ error: '素材不存在' });
-    const type = req.file.mimetype.startsWith('image/') ? 'image' : req.file.mimetype.startsWith('video/') ? 'video' : '';
-    if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
-    if (type !== current.type) return res.status(400).json({ error: `只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件` });
-
-    uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
-    await putObject(uploadedKey, tempPath, req.file.mimetype);
-    let thumbKey = null;
-    let durationSeconds = null;
     if (type === 'video') {
       const previewPath = `${tempPath}.jpg`;
       try {
         durationSeconds = await inspectVideo(tempPath, previewPath);
-        thumbKey = `${uploadedKey}.jpg`;
-        uploadedThumbKey = thumbKey;
+        thumbKey = `${objectKey}.jpg`;
         await putObject(thumbKey, previewPath, 'image/jpeg');
       } catch (error) {
         console.warn('Replacement video preview generation skipped:', error.message);
@@ -1263,27 +1255,87 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
               music_title='', music_artist='', music_source='', music_status='', music_confidence='', music_evidence=''
         WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL
         RETURNING *`,
-      [uploadedKey, thumbKey, req.file.mimetype, req.file.size, sha256, durationSeconds, req.params.id, req.user.id],
+      [objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, assetId, userId],
     );
-    if (!rows[0]) {
-      await Promise.all([
-        deleteObject(uploadedKey).catch(() => {}),
-        deleteObject(uploadedThumbKey).catch(() => {}),
-      ]);
-      return res.status(404).json({ error: '素材不存在' });
-    }
-    if (type === 'video') await pool.query('DELETE FROM asset_music WHERE asset_id=$1', [req.params.id]);
-    const hydrated = await assetQuery(req.params.id, req.user.id);
+    if (!rows[0]) throw Object.assign(new Error('素材不存在'), { statusCode: 404 });
+    if (type === 'video') await pool.query('DELETE FROM asset_music WHERE asset_id=$1', [assetId]);
+    const hydrated = await assetQuery(assetId, userId);
     await Promise.all([
       deleteObject(current.object_key).catch((error) => console.warn('Old asset cleanup skipped:', error.message)),
       deleteObject(current.thumb_key).catch((error) => console.warn('Old thumbnail cleanup skipped:', error.message)),
     ]);
-    res.json({ asset: await hydrateAsset(hydrated) });
+    return await hydrateAsset(hydrated);
   } catch (error) {
-    await Promise.all([
-      deleteObject(uploadedKey).catch(() => {}),
-      deleteObject(uploadedThumbKey).catch(() => {}),
-    ]);
+    await Promise.all([objectKey, thumbKey].filter(Boolean).map((key) => deleteObject(key).catch(() => {})));
+    throw error;
+  }
+}
+
+app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req, res, next) => {
+  let tempPath = req.file && req.file.path;
+  let uploadedKey = '';
+  try {
+    if (!req.file) return res.status(400).json({ error: '请选择要替换的文件' });
+    const current = await assetQuery(req.params.id, req.user.id);
+    if (!current) return res.status(404).json({ error: '素材不存在' });
+    const type = assetTypeFromMime(req.file.mimetype);
+    if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
+    if (type !== current.type) return res.status(400).json({ error: `只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件` });
+    uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
+    await putObject(uploadedKey, tempPath, req.file.mimetype);
+    const asset = await applyAssetFileReplacement({
+      userId: req.user.id,
+      assetId: req.params.id,
+      current,
+      tempPath,
+      objectKey: uploadedKey,
+      mimeType: req.file.mimetype,
+      sizeBytes: req.file.size,
+    });
+    res.json({ asset });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+    next(error);
+  } finally {
+    if (tempPath) await fsp.unlink(tempPath).catch(() => {});
+  }
+});
+
+app.post('/api/assets/:id/file/finalize', requireUser, async (req, res, next) => {
+  let tempPath;
+  try {
+    const objectKey = String(req.body.objectKey || '').trim();
+    if (!directUploadKeyPattern.test(objectKey) || !objectKey.startsWith(`${req.user.id}/`)) {
+      return res.status(400).json({ error: '上传对象无效' });
+    }
+    const current = await assetQuery(req.params.id, req.user.id);
+    if (!current) return res.status(404).json({ error: '素材不存在' });
+    let metadata;
+    try {
+      metadata = await headObject(objectKey);
+    } catch (_) {
+      return res.status(404).json({ error: '上传的对象不存在，请重试上传' });
+    }
+    const mimeType = String(metadata.headers?.['content-type'] || '').split(';')[0].trim();
+    const sizeBytes = Number(metadata.headers?.['content-length'] || 0);
+    if (!sizeBytes || sizeBytes > Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024)) {
+      return res.status(400).json({ error: '上传的文件大小无效或超过限制' });
+    }
+    const originalName = path.basename(objectKey).replace(/^[0-9a-f-]{36}-/i, '');
+    tempPath = path.join(uploadDir, `${crypto.randomUUID()}-${safeName(originalName)}`);
+    await downloadObject(objectKey, tempPath);
+    const asset = await applyAssetFileReplacement({
+      userId: req.user.id,
+      assetId: req.params.id,
+      current,
+      tempPath,
+      objectKey,
+      mimeType,
+      sizeBytes,
+    });
+    res.json({ asset });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
     next(error);
   } finally {
     if (tempPath) await fsp.unlink(tempPath).catch(() => {});
