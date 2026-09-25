@@ -880,12 +880,39 @@ function Workspace({ user, onLogout }) {
       throw error;
     }
   };
-  const replaceAssetFile = async (id, file) => {
-    const form = new FormData();
-    form.append("file", file);
+  const replaceAssetFile = async (id, file, onProgress) => {
     try {
-      const payload = await apiFetch(`/assets/${id}/file`, { method: "POST", body: form });
-      const updated = normaliseAsset(payload.asset);
+      let updated;
+      try {
+        const ticket = await apiFetch("/assets/upload-ticket", {
+          method: "POST",
+          body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream" }),
+        });
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("PUT", ticket.url);
+          xhr.setRequestHeader("Content-Type", ticket.contentType);
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100), "upload");
+          };
+          xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`云存储直传失败（HTTP ${xhr.status}）`)));
+          xhr.onerror = () => reject(new Error("网络中断，直传失败"));
+          xhr.send(file);
+        });
+        onProgress?.(100, "finalize");
+        const payload = await apiFetch(`/assets/${id}/file/finalize`, {
+          method: "POST",
+          body: JSON.stringify({ objectKey: ticket.objectKey, filename: file.name, size: file.size }),
+        });
+        updated = normaliseAsset(payload.asset);
+      } catch (directError) {
+        console.warn("替换文件直传失败，回退服务器上传:", directError);
+        onProgress?.(0, "server");
+        const form = new FormData();
+        form.append("file", file);
+        const payload = await apiFetch(`/assets/${id}/file`, { method: "POST", body: form });
+        updated = normaliseAsset(payload.asset);
+      }
       setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
       setSelected((item) => (item?.id === id ? updated : item));
       setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
@@ -1687,7 +1714,7 @@ function Workspace({ user, onLogout }) {
           assets={assets}
           onClose={() => setEditingAsset(null)}
           onSave={(fields) => saveAssetEdit(editingAsset.id, fields)}
-          onReplace={(file) => replaceAssetFile(editingAsset.id, file)}
+          onReplace={(file, onProgress) => replaceAssetFile(editingAsset.id, file, onProgress)}
         />
       )}
       {editingMusicTrack && (
@@ -2835,6 +2862,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
   const [note, setNote] = useState(asset.note || "");
   const [used, setUsed] = useState(Boolean(asset.used));
   const [replacementFile, setReplacementFile] = useState(null);
+  const [replaceProgress, setReplaceProgress] = useState(null);
   const [parentAssetIds, setParentAssetIds] = useState((asset.parentAssetIds || []).map(String));
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2865,7 +2893,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
     setSaving(true);
     setError("");
     try {
-      if (replacementFile) await onReplace?.(replacementFile);
+      if (replacementFile) await onReplace?.(replacementFile, (percent, phase) => setReplaceProgress({ percent, phase }));
       await onSave({
         name: trimmedName,
         source: source.trim() || "本地导入",
@@ -2882,6 +2910,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
       setError(saveError.message || "保存失败，请稍后重试");
     } finally {
       setSaving(false);
+      setReplaceProgress(null);
     }
   };
   return (
@@ -3004,11 +3033,39 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
           </button>
         </div>
         {error && <div className="auth-error edit-error">{error}</div>}
+        {saving && replaceProgress && (
+          <div className="upload-progress">
+            <div className="upload-progress-head">
+              <span className="upload-progress-name">{replacementFile.name}</span>
+              <span className="upload-progress-meta">
+                {replaceProgress.phase === "upload"
+                  ? ` · ${replaceProgress.percent}%`
+                  : replaceProgress.phase === "finalize"
+                    ? " · 生成封面并写入数据库"
+                    : " · 服务器通道"}
+              </span>
+            </div>
+            <div className="upload-progress-bar">
+              <i
+                className={replaceProgress.phase === "upload" ? "" : "pulsing"}
+                style={{ width: replaceProgress.phase === "upload" ? `${replaceProgress.percent}%` : "100%" }}
+              />
+            </div>
+          </div>
+        )}
         <div className="modal-foot">
           <button type="button" className="text-button" onClick={onClose}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>
             <Check size={16} />
-            {saving ? "保存中…" : "保存修改"}
+            {saving
+              ? replaceProgress?.phase === "upload"
+                ? `直传中 ${replaceProgress.percent}%`
+                : replaceProgress?.phase === "finalize"
+                  ? "处理中…"
+                  : replaceProgress?.phase === "server"
+                    ? "服务器通道上传中…"
+                    : "保存中…"
+              : "保存修改"}
           </button>
         </div>
       </form>
