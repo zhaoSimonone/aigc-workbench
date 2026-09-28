@@ -2417,16 +2417,15 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
     >
       <div className={`asset-preview ${asset.color}`}>
         {asset.type === "video" ? (
-          <video
-            src={asset.src}
-            poster={asset.thumb || undefined}
-            muted
-            playsInline
-            preload="metadata"
-            aria-label={`${asset.name} 视频预览`}
-          />
+          asset.thumb ? (
+            <img src={asset.thumb} alt={`${asset.name} 视频封面`} loading="lazy" decoding="async" />
+          ) : (
+            <span className="asset-preview-placeholder">
+              <FileVideo size={32} aria-label={`${asset.name} 暂无视频封面`} />
+            </span>
+          )
         ) : (
-          <img src={asset.src || asset.thumb} alt="" />
+          <img src={asset.thumb || asset.src} alt={asset.name} loading="lazy" decoding="async" />
         )}
         {asset.type === "video" && (
           <div className="play-chip">

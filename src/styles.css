@@ -1592,6 +1592,13 @@ button {
   object-fit: cover;
   transition: transform 0.3s;
 }
+.asset-preview-placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: rgba(31, 38, 40, 0.46);
+}
 .asset-card:hover .asset-preview img {
   transform: scale(1.035);
 }

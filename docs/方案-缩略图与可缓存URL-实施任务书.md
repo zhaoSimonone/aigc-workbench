@@ -1,280 +1,282 @@
-# 图片缩略图 + 可缓存 URL 实施任务书
+# 图片缩略图、可缓存 URL 与媒体读请求优化实施说明
 
-> 本任务书面向执行模型：**所有技术方案已定稿、核心代码已在线上环境验证通过**。请严格按步骤执行，不要自行改动设计、不要"顺手优化"。遇到与任务书不符的代码现状，停下来报告，不要猜测着改。
+> 修订日期：2026-09-28
+> 当前状态：代码已在本地实现，尚未部署；部署前需完成代码 Review 和生产环境 dry-run。
 
-## 一、背景与目标
+## 一、背景
 
-线上问题：素材库（449 视频 + 165 图片）每次浏览都会重新从 COS 下载全部缩略图和图片**原图**，原因是：
+2026 年 9 月 COS 数据显示：
 
-1. 图片素材在网格中加载的是原图（平均 1.77MB/张），没有缩略图；
-2. 签名 URL 每次生成时间戳都不同，浏览器永远无法命中缓存。
+- 存储约 3.27GB；
+- 总流量约 278.46GB；
+- 内网下行约 240.30GB；
+- 外网下行约 38.16GB；
+- 请求约 25.4 万次，几乎全部为读请求。
 
-目标：
+现有实现存在四个主要放大点：
 
-1. 图片素材上传/替换时自动生成 480px 宽的 JPG 缩略图（网格自动使用，前端**零改动**）；
-2. 缩略图与头像改用「24 小时窗口内完全一致 + 7 天有效期」的稳定签名 URL，并带 `Cache-Control: public, max-age=604800`，让浏览器命中本地缓存；
-3. 存量数据通过两个脚本补齐（165 张图片生成缩略图；全部视频缩略图和头像补 Cache-Control 元数据）。
+1. 图片网格优先加载原图，没有图片缩略图；
+2. COS SDK 每次生成不同的缩略图签名 URL，浏览器无法复用同一缓存键；
+3. 网格为每个视频挂载 `<video preload="metadata">`，即使不播放也会请求视频；
+4. 每个视频/音频 Range 请求先调用 `headObject`，随后再调用 `getObject`，一次浏览器请求对应两次 COS 读请求。
 
-预期效果：月外网下行 38GB → 2–4GB，COS 请求数 25.4 万/月 → 3–4 万/月，二次浏览秒开。
+## 二、本次改造范围
 
-## 二、已验证的关键技术结论（勿改动，直接照抄）
+### 2.1 图片与视频封面
 
-以下三个坑都已在生产环境实测踩过，**任务书给的代码就是修复后的版本**：
+- 图片上传、直传 finalize、远程导入和文件替换时生成 480px JPG 缩略图；
+- 视频封面沿用现有抽帧逻辑；
+- 新生成的图片缩略图、视频封面和头像统一设置：
 
-1. **签名要对原始 key 计算，URL 用编码后的路径**。COS 服务端把 URL 解码回原始 key 后验签。若对编码后路径签名，含中文/空格/括号的 key 全部 403。
-2. **`encodeURIComponent` 不编码 `!'()*` 五个字符，COS 验签要求编码**，所以需要 `encodeCosSegment` 补转义。
-3. **putObjectCopy 自拷贝必须带 `MetadataDirective: 'Replaced'`**，且 `CopySource` 必须是完整域名格式 `bucket.cos.region.myqcloud.com/<编码后key>`（短格式 `bucket/key` 会报 "CopySource format error"）。
-
-另：签名 URL 只签了 `get` 方法，用 `curl -I`（HEAD）测试会得到 403——**这是预期行为，不是 bug**，验证时必须用 GET（见第六节命令）。
-
-## 三、改动清单（仅服务端，前端零改动）
-
-### 3.1 `server/src/index.js`
-
-#### (a) 新增稳定签名函数（放在 `objectUrl` 函数后面）
-
-```js
-function encodeCosSegment(segment) {
-  return encodeURIComponent(segment).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
-}
-
-// 稳定签名 URL：24 小时窗口内多次调用生成完全一致的 URL（浏览器可命中缓存），签名本身 7 天有效。
-// 注意：FormatString 必须用原始未编码的 key（与 cos-nodejs-sdk-v5 getAuth 行为一致）。
-function stableSignedUrl(key) {
-  const host = `${bucket}.cos.${region}.myqcloud.com`;
-  const nowUnix = Math.floor(Date.now() / 1000);
-  const windowSeconds = 24 * 3600;
-  const windowStart = Math.floor(nowUnix / windowSeconds) * windowSeconds;
-  const keyTime = `${windowStart};${windowStart + 7 * 24 * 3600}`;
-  const encodedPath = key.split('/').map(encodeCosSegment).join('/');
-  const httpString = `get\n/${key}\n\nhost=${host}\n`;
-  const signKey = crypto.createHmac('sha1', process.env.TENCENT_COS_SECRET_KEY).update(keyTime).digest('hex');
-  const sha1 = (data) => crypto.createHash('sha1').update(data).digest('hex');
-  const stringToSign = `sha1\n${keyTime}\n${sha1(httpString)}\n`;
-  const signature = crypto.createHmac('sha1', signKey).update(stringToSign).digest('hex');
-  return `https://${host}/${encodedPath}?q-sign-algorithm=sha1&q-ak=${encodeURIComponent(process.env.TENCENT_COS_SECRET_ID)}&q-sign-time=${keyTime}&q-key-time=${keyTime}&q-header-list=host&q-url-param-list=&q-signature=${signature}`;
-}
+```http
+Cache-Control: private, max-age=86400, immutable
+Content-Type: image/jpeg
 ```
 
-#### (b) `putObject` 支持可选 Cache-Control
+使用 `private` 是为了只允许浏览器私有缓存，不允许共享代理缓存登录用户的素材。
 
-当前签名：`function putObject(key, filePath, contentType)`（用 `grep -n "function putObject" server/src/index.js` 定位）。改为第四个可选参数，并透传给 SDK：
+### 2.2 稳定签名 URL
 
-```js
-function putObject(key, filePath, contentType, cacheControl) {
-  // ...原有 cos.putObject 调用中，params 增加：
-  // CacheControl: cacheControl || undefined
-}
+缩略图与头像使用稳定签名 URL：
+
+- 同一个对象在 24 小时窗口内生成完全一致的 URL；
+- 签名有效期覆盖当前窗口及后续一个窗口，共 48 小时；
+- 浏览器缓存时间为 24 小时，与 URL 稳定窗口对齐；
+- 图片原图仍使用短期 SDK 签名 URL，不改为稳定签名；
+- 下载 URL、上传 ticket 和原图签名逻辑保持不变。
+
+签名实现要求：
+
+1. 签名使用原始未编码 Object Key；
+2. URL 路径按 segment 编码；
+3. `!'()*` 必须额外百分号编码；
+4. `q-sign-time` 和 `q-key-time` 使用同一个固定窗口。
+
+### 2.3 前端网格
+
+素材网格必须进行小范围修改：
+
+- 图片使用 `asset.thumb || asset.src`；
+- 视频只展示 `asset.thumb`，不在网格挂载视频 `src`；
+- 图片和视频封面增加 `loading="lazy"` 与 `decoding="async"`；
+- 视频只在用户打开详情后加载。
+
+### 2.4 视频与音频流
+
+- `/api/assets/:id/stream` 使用数据库中的 `size_bytes`，不再为每个分片调用 `headObject`；
+- `/api/music-tracks/:id/stream` 做相同修改；
+- 媒体流响应覆盖全局 `no-store`，使用：
+
+```http
+Cache-Control: private, max-age=3600
+ETag: "<sha256>"
 ```
 
-即 SDK 调用形如：
+本阶段仍由应用服务器转发视频流；COS/CDN 直链属于后续阶段。
 
-```js
-cos.putObject({ Bucket: bucket, Region: region, Key: key, Body: fs.createReadStream(filePath), ContentType: contentType, ...(cacheControl ? { CacheControl: cacheControl } : {}) }, ...原有回调...);
+## 三、改动文件
+
+```text
+server/src/index.js
+server/scripts/backfill-video-previews.js
+server/scripts/set-thumb-cache-headers.js
+src/main.jsx
+src/styles.css
+docs/方案-缩略图与可缓存URL-实施任务书.md
 ```
 
-#### (c) `ingestAsset`：图片生成缩略图
+## 四、存量数据脚本
 
-在 `ingestAsset` 函数内，现有 `if (type === 'video') {...}` 生成封面代码块的**后面**，增加图片分支（注意 ffmpeg 参数里 `\\(` 的双反斜杠是转义语法，照抄）：
+### 4.1 `backfill-video-previews.js`
 
-```js
-    if (type === 'image') {
-      const previewPath = `${tempPath}.jpg`;
-      try {
-        await execFileAsync(ffmpegPath, ['-y', '-i', tempPath, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', previewPath], { timeout: 60000 });
-        thumbKey = `${objectKey}.jpg`;
-        await putObject(thumbKey, previewPath, 'image/jpeg', 'public, max-age=604800');
-      } catch (error) {
-        console.warn('Image preview generation skipped:', error.message);
-      } finally {
-        await fsp.unlink(previewPath).catch(() => {});
-      }
-    }
+默认只处理：
+
+```sql
+WHERE deleted_at IS NULL
+  AND thumb_key IS NULL
+  AND type IN ('video', 'image')
 ```
 
-同时把**视频分支里的缩略图上传**改为带 Cache-Control：
+支持：
 
-```js
-        await putObject(thumbKey, previewPath, 'image/jpeg', 'public, max-age=604800');
+```bash
+# 只查看待处理对象，不下载和写入
+node scripts/backfill-video-previews.js --dry-run
+
+# 处理缺失缩略图的图片和视频
+node scripts/backfill-video-previews.js
 ```
 
-#### (d) `applyAssetFileReplacement`：替换文件时同样处理
+禁止在生产环境直接运行：
 
-该函数内已有 `if (type === 'video')` 封面生成块。做两处修改：
-
-1. 视频缩略图上传同样加 `'public, max-age=604800'`；
-2. 复制 (c) 中的图片缩略图分支加在视频块后面（图片替换后旧缩略图指向旧 key，必须重新生成，否则网格会显示坏图）。
-
-#### (e) `hydrateAsset`：缩略图改用稳定签名
-
-当前：`row.thumb_key ? objectUrl(row.thumb_key) : Promise.resolve('')`。改为：
-
-```js
-    row.thumb_key ? Promise.resolve(stableSignedUrl(row.thumb_key)) : Promise.resolve(''),
+```bash
+node scripts/backfill-video-previews.js --regenerate
 ```
 
-**注意：图片的 `src` 字段（`row.type === 'video' ? ... : objectUrl(row.object_key)`）保持 `objectUrl` 不变**——原图不缓存，详情抽屉按需加载，这是定稿决策，不要改。
+除非明确需要重新生成全部图片和视频封面。
 
-#### (f) `albumCoverMap`：相册封面改用稳定签名
+### 4.2 `set-thumb-cache-headers.js`
 
-函数内两处 `objectUrl(...)`（cover 的 src 和 thumb）改为 `Promise.resolve(stableSignedUrl(...))`。
+脚本只能查询并修改：
 
-#### (g) 头像：上传带 Cache-Control + 读取用稳定签名
+- `assets.thumb_key`；
+- `video_accounts.avatar_key`。
 
-1. `POST /api/video-accounts/avatar-upload` 里 `putObject(avatarKey, previewPath, 'image/jpeg')` → 增加 `'public, max-age=604800'`；
-2. `publicVideoAccountWithAvatar` 里 `objectUrl(row.avatar_key)` → `stableSignedUrl(row.avatar_key)`（它不是 Promise，直接同步返回）。
+不得查询或修改 `assets.object_key`，避免对原图和原视频执行元数据替换。
 
-#### (h) 明确不要动的部分
+脚本支持：
 
-- `buildDownloadUrl` / `GET /api/assets/:id/download` / `GET /api/assets/:id/download-url` 的 SDK 签名（下载需要 `response-*` 覆盖参数，且一次性使用无需缓存）；
-- `GET /api/assets/:id/stream`（视频播放走服务器转发，属阶段 2 范围）；
-- `POST /api/assets/upload-ticket` 的 PUT 签名；
-- 前端 `src/` 目录**完全不改**（网格已优先使用 `asset.thumb`）。
+```bash
+# 只打印对象列表
+node scripts/set-thumb-cache-headers.js --dry-run
 
-### 3.2 `server/scripts/backfill-video-previews.js`：补图片缩略图
-
-1. 默认模式（无参数）的 SELECT 改为同时处理缺缩略图的视频和图片：
-
-```js
-  const { rows } = await pool.query(
-    regenerate
-      ? "SELECT id, type, object_key FROM assets WHERE deleted_at IS NULL AND (type='video' OR type='image') ORDER BY created_at ASC"
-      : "SELECT id, type, object_key FROM assets WHERE deleted_at IS NULL AND thumb_key IS NULL AND (type='video' OR type='image') ORDER BY created_at ASC",
-  );
+# 对缩略图和头像执行自拷贝，补齐缓存元数据
+node scripts/set-thumb-cache-headers.js
 ```
 
-2. `generatePreview` 增加图片分支（在现有视频逻辑旁）：
+自拷贝参数必须包含：
 
 ```js
-async function generatePreview(input, output, type) {
-  if (type === 'image') {
-    await execFileAsync(ffmpegPath, ['-y', '-i', input, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', output], { timeout: 60000 });
-    return null;
-  }
-  // ...原有视频逻辑不变（时长 + pickPreviewTime + 抽帧）...
-}
+MetadataDirective: 'Replaced'
+ContentType: 'image/jpeg'
+CacheControl: 'private, max-age=86400, immutable'
 ```
 
-调用处传 `row.type`；图片时 duration 传 `null`。
+生产脚本不为 Region 提供静默默认值；缺失数据库、Bucket、Region 或密钥配置时立即失败。
 
-3. 脚本里的 `putObject(thumbKey, output, 'image/jpeg')` → 加 `'public, max-age=604800'`。
-
-### 3.3 新建 `server/scripts/set-thumb-cache-headers.js`
-
-给**存量**缩略图和头像补 Cache-Control 元数据（新上传的已由 putObject 参数覆盖）。完整文件如下，直接创建：
-
-```js
-const { Pool } = require('pg');
-const COS = require('cos-nodejs-sdk-v5');
-require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || require('path').resolve(process.cwd(), '.env') });
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const bucket = process.env.TENCENT_COS_BUCKET;
-const region = process.env.TENCENT_COS_REGION || 'ap-shanghai';
-const cos = new COS({ SecretId: process.env.TENCENT_COS_SECRET_ID, SecretKey: process.env.TENCENT_COS_SECRET_KEY, Protocol: 'https:' });
-
-function encodeCosSegment(segment) {
-  return encodeURIComponent(segment).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
-}
-
-async function main() {
-  const { rows } = await pool.query(`
-    SELECT object_key AS key FROM assets WHERE thumb_key IS NOT NULL AND deleted_at IS NULL
-    UNION
-    SELECT thumb_key AS key FROM assets WHERE thumb_key IS NOT NULL AND deleted_at IS NULL
-    UNION
-    SELECT avatar_key AS key FROM video_accounts WHERE avatar_key IS NOT NULL
-  `);
-  const host = `${bucket}.cos.${region}.myqcloud.com`;
-  console.log(`Found ${rows.length} object(s) to update`);
-  let done = 0;
-  let failed = 0;
-  for (const row of rows) {
-    const key = row.key;
-    try {
-      await new Promise((resolve, reject) => {
-        cos.putObjectCopy({
-          Bucket: bucket,
-          Region: region,
-          Key: key,
-          CopySource: `${host}/${key.split('/').map(encodeCosSegment).join('/')}`,
-          MetadataDirective: 'Replaced',
-          CacheControl: 'public, max-age=604800',
-        }, (err) => (err ? reject(err) : resolve()));
-      });
-      done += 1;
-    } catch (error) {
-      failed += 1;
-      console.error(`Failed ${key}: ${error.message}`);
-    }
-    if ((done + failed) % 50 === 0) console.log(`progress: ${done + failed}/${rows.length}`);
-  }
-  console.log(`Done. ok=${done} failed=${failed}`);
-}
-
-main().finally(() => pool.end());
-```
-
-## 四、本地验证（部署前）
+## 五、本地验证
 
 ```bash
 node --check server/src/index.js
 node --check server/scripts/backfill-video-previews.js
 node --check server/scripts/set-thumb-cache-headers.js
-cd server && npm install && cd ..
-npm run build   # 前端无改动，构建应无 diff；若 vite 报 command not found 先 npm install
+npm run build
 ```
 
-用 `git diff --stat` 核对：只应有 `server/src/index.js`、`server/scripts/backfill-video-previews.js`、新增 `server/scripts/set-thumb-cache-headers.js` 三个文件变化。出现 `src/` 下的改动即为跑偏，回滚重做。
-
-## 五、部署（与既有流程一致）
+检查改动：
 
 ```bash
-git add server && git commit -m "feat: image thumbnails and cacheable stable URLs" && git push origin main
-tar czf /tmp/aigc-server.tar.gz server/src server/schema.sql server/package.json server/package-lock.json server/scripts
-scp /tmp/aigc-server.tar.gz tencent-personal:/tmp/
-ssh tencent-personal 'cd /opt/aigc-shelf && sudo tar xzf /tmp/aigc-server.tar.gz && sudo docker compose up -d --build api && rm /tmp/aigc-server.tar.gz'
+git diff --check
+git diff --stat
+git diff -- server/src/index.js \
+  server/scripts/backfill-video-previews.js \
+  server/scripts/set-thumb-cache-headers.js \
+  src/main.jsx \
+  src/styles.css
 ```
 
-## 六、上线后操作（在服务器容器内执行，有先后顺序）
+## 六、上线前 Review 重点
+
+1. 图片网格是否确实使用 `asset.thumb || asset.src`；
+2. 视频网格是否完全不再挂载 `/api/assets/:id/stream`；
+3. 稳定签名是否与 COS SDK 对相同 KeyTime 的签名结果一致；
+4. 缓存脚本 SQL 是否只包含 `thumb_key` 和 `avatar_key`；
+5. 自拷贝是否显式保留 `Content-Type: image/jpeg`；
+6. 两个回填脚本是否支持 `--dry-run`；
+7. 生产环境是否显式配置 `TENCENT_COS_REGION`；
+8. 图片上传、直传 finalize、远程导入和文件替换是否全部生成缩略图；
+9. 视频/音频流是否不再执行 `headObject`。
+
+## 七、生产执行顺序
+
+部署新代码后按以下顺序操作：
 
 ```bash
 # 1. 健康检查
-ssh tencent-personal 'curl -s http://127.0.0.1:18080/api/health'
+curl -s http://127.0.0.1:18080/api/health
 
-# 2. 给存量缩略图/头像补 Cache-Control（约 600 个对象，几分钟）
-ssh tencent-personal 'sudo docker exec aigc-shelf-api-1 node scripts/set-thumb-cache-headers.js'
+# 2. 查看将修改的存量缩略图和头像
+node scripts/set-thumb-cache-headers.js --dry-run
 
-# 3. 给 165 张存量图片生成缩略图（只处理 thumb_key IS NULL 的，不会碰已有视频）
-ssh tencent-personal 'sudo docker exec aigc-shelf-api-1 node scripts/backfill-video-previews.js'
+# 3. 确认列表无 object_key 后补缓存元数据
+node scripts/set-thumb-cache-headers.js
+
+# 4. 查看缺少缩略图的素材
+node scripts/backfill-video-previews.js --dry-run
+
+# 5. 补齐缺少的图片/视频缩略图
+node scripts/backfill-video-previews.js
 ```
 
-**注意：不要运行 `--regenerate`**，那会重建全部 449 个视频封面，无必要且耗时。
+在容器部署环境中，用 `docker exec` 包裹上述 node 命令。
 
-## 七、验收标准（逐条实测，全部满足才算完成）
+## 八、验收标准
 
-1. **URL 稳定性**：登录后在两分钟内请求两次 `GET /api/assets`，两次响应中同一素材的 `thumb` 字段字符串**完全一致**（diff 确认）。
-2. **Cache-Control 生效**：从 `/api/assets` 响应中任取一个 `thumb` URL，执行
-   `curl -s -D - -o /dev/null -r 0-100 "<thumb url>"`，
-   应返回 `HTTP/1.1 206` 且包含 `Cache-Control: public, max-age=604800`。
-   （**禁止用 `curl -I`**：HEAD 请求对 get 签名必返 403，属预期。）
-3. **图片缩略图**：第 3 步脚本执行后，`SELECT count(*) FROM assets WHERE type='image' AND thumb_key IS NOT NULL AND deleted_at IS NULL` 应等于 165；刷新网页，图片网格加载的是小图（开发者工具 Network 里图片请求体积应 < 300KB）。
-4. **新上传回归**：网页上传一张新图片 → 网格正常显示缩略图；上传一个新视频 → 封面正常。再测试"编辑素材→替换文件"各一次，确认替换后网格缩略图正常（新 key 新图）。
-5. **缓存命中**：同一浏览器当天第二次刷新素材库，开发者工具 Network 中缩略图请求显示 `from disk cache`（或请求数显著减少）。
-6. **次日观察**：COS 控制台请求量应明显下降（预期 25.4 万/月 → 3–4 万/月量级）。
+### 8.1 功能验收
 
-## 八、已知坑与禁止事项（再次强调）
+1. 上传新图片后，响应中的 `thumb` 非空；
+2. 替换图片文件后，`thumb` 指向新 Object Key；
+3. 上传和替换视频后，视频封面正常；
+4. 头像上传和展示正常；
+5. 相册封面展示正常；
+6. 视频详情播放和 Range 拖动正常；
+7. 音频播放正常。
 
-| 坑 | 正确做法 |
+### 8.2 网络验收
+
+1. 同一 24 小时窗口内，两次调用 `/api/assets`，同一 `thumb` URL 完全一致；
+2. 对缩略图执行 GET Range 请求，响应包含：
+
+```http
+Cache-Control: private, max-age=86400, immutable
+Content-Type: image/jpeg
+```
+
+3. 素材网格的图片请求优先使用 `.jpg` 缩略图；
+4. 网格中不应出现 `/api/assets/:id/stream` 请求；
+5. 第二次刷新时缩略图显示 `from memory cache` 或 `from disk cache`；
+6. 播放一个视频分片时，COS 不应再额外产生对应的 HEAD Object 请求。
+
+### 8.3 数据验收
+
+```sql
+SELECT type, count(*)
+  FROM assets
+ WHERE deleted_at IS NULL
+ GROUP BY type;
+
+SELECT type, count(*)
+  FROM assets
+ WHERE deleted_at IS NULL
+   AND thumb_key IS NOT NULL
+ GROUP BY type;
+```
+
+图片和视频的有效记录应都有 `thumb_key`；无法生成缩略图的异常文件需要单独记录，不得静默忽略。
+
+## 九、预期效果与边界
+
+本次改造预计：
+
+- 显著降低图片原图外网下行；
+- 消除素材网格中的视频 metadata 批量请求；
+- 视频和音频每个 Range 请求减少一次 COS HEAD；
+- 同一天内重复浏览时，缩略图和头像命中浏览器缓存。
+
+不承诺固定的“25.4 万降到 3～4 万”数值；实际效果取决于真实播放次数、刷新次数和图片尺寸。上线后应分别观察：
+
+- COS 外网下行；
+- COS 内网下行；
+- GET 请求；
+- HEAD 请求；
+- 应用服务器公网出流量。
+
+## 十、回滚
+
+代码可通过 Git 回滚，但脚本造成的 COS 元数据修改不会随 Git 自动回滚。
+
+当前脚本只处理缩略图和头像，因此即使代码回滚，保留其私有缓存元数据通常不影响功能。若需要恢复，必须通过另一份元数据脚本显式修改，不能仅执行 `git revert`。
+
+## 十一、已验证的 COS 实施注意事项
+
+| 场景 | 正确处理 |
 |---|---|
-| 对编码后路径签名 | 签名用原始 key，URL 用 `encodeCosSegment` 编码 |
-| `encodeURIComponent` 漏掉 `!'()*` | 必须用任务书的 `encodeCosSegment` |
-| `curl -I` 测签名 URL 得 403 | 用 GET（`curl -s -D - -o /dev/null -r 0-100`） |
-| putObjectCopy 自拷贝报 illegal | 必须 `MetadataDirective: 'Replaced'` |
-| CopySource 用 `bucket/key` 短格式报错 | 用 `bucket.cos.region.myqcloud.com/<编码后key>` 全格式 |
-| 想改前端、下载签名、视频流、上传 ticket | 全部禁止，本方案前端零改动 |
-| 想给原图（`src`）也加缓存 | 禁止，定稿决策：只缓存缩略图和头像 |
+| 对含中文、空格或括号的路径签名 | FormatString 使用原始未编码 Key，最终 URL 路径再分段编码 |
+| `encodeURIComponent` 不编码 `!'()*` | 使用 `encodeCosSegment` 将这五个字符补充为百分号编码 |
+| 自拷贝修改 Cache-Control | 必须设置 `MetadataDirective: 'Replaced'`，并显式保留 `ContentType` |
+| `CopySource` 使用短格式时报错 | 使用 `bucket.cos.region.myqcloud.com/<编码后key>` 完整格式 |
+| GET 签名 URL 使用 `curl -I` 返回 403 | 签名只覆盖 GET，使用 GET Range 请求验证，不使用 HEAD |
+| `--regenerate` 同名覆盖缩略图 | 旧稳定 URL 可能在浏览器私有缓存中保留最多 24 小时，生产执行前需明确告知 |
+| 播放接口返回 404 或长度异常 | 优先核对 COS 对象是否存在，以及数据库 `size_bytes` 是否与对象实际大小一致 |
 
-## 九、回滚
-
-所有改动仅服务端：`git revert <commit>` 后按第五节重新打包部署即可。两个脚本只是幂等地补元数据/缩略图，无需回滚数据（缩略图对象可留在 COS，不影响任何功能）。
+视频流 URL 带有基于 SHA-256 的 `v` 查询参数。替换视频文件后 SHA-256 改变，前端会获得新的播放 URL，避免命中替换前的浏览器缓存。

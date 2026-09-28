@@ -23,6 +23,8 @@ const uploadDir = process.env.UPLOAD_TMP_DIR || path.join(os.tmpdir(), 'aigc-she
 const sessionDays = Number(process.env.SESSION_DAYS || 30);
 const bucket = process.env.TENCENT_COS_BUCKET;
 const region = process.env.TENCENT_COS_REGION || 'ap-guangzhou';
+const mediaCacheControl = 'private, max-age=86400, immutable';
+const streamCacheControl = 'private, max-age=3600';
 const cos = new COS({
   SecretId: process.env.TENCENT_COS_SECRET_ID,
   SecretKey: process.env.TENCENT_COS_SECRET_KEY,
@@ -96,7 +98,30 @@ function objectUrl(key) {
   });
 }
 
-function putObject(key, filePath, contentType) {
+function encodeCosSegment(segment) {
+  return encodeURIComponent(segment).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function stableSignedUrl(key) {
+  const secretId = process.env.TENCENT_COS_SECRET_ID;
+  const secretKey = process.env.TENCENT_COS_SECRET_KEY;
+  if (!bucket || !region || !secretId || !secretKey) throw new Error('COS 配置不完整，无法生成签名地址');
+  const host = `${bucket}.cos.${region}.myqcloud.com`;
+  const nowUnix = Math.floor(Date.now() / 1000);
+  const windowSeconds = 24 * 3600;
+  const windowStart = Math.floor(nowUnix / windowSeconds) * windowSeconds;
+  // URL 每 24 小时轮换；签名多保留一个窗口，确保临近窗口结束获取的响应仍可缓存完整 24 小时。
+  const keyTime = `${windowStart};${windowStart + 2 * windowSeconds}`;
+  const encodedPath = key.split('/').map(encodeCosSegment).join('/');
+  const httpString = `get\n/${key}\n\nhost=${host}\n`;
+  const signKey = crypto.createHmac('sha1', secretKey).update(keyTime).digest('hex');
+  const formatSha1 = crypto.createHash('sha1').update(httpString).digest('hex');
+  const stringToSign = `sha1\n${keyTime}\n${formatSha1}\n`;
+  const signature = crypto.createHmac('sha1', signKey).update(stringToSign).digest('hex');
+  return `https://${host}/${encodedPath}?q-sign-algorithm=sha1&q-ak=${encodeURIComponent(secretId)}&q-sign-time=${keyTime}&q-key-time=${keyTime}&q-header-list=host&q-url-param-list=&q-signature=${signature}`;
+}
+
+function putObject(key, filePath, contentType, cacheControl) {
   return new Promise((resolve, reject) => {
     cos.putObject({
       Bucket: bucket,
@@ -104,6 +129,7 @@ function putObject(key, filePath, contentType) {
       Key: key,
       Body: fs.createReadStream(filePath),
       ContentType: contentType,
+      ...(cacheControl ? { CacheControl: cacheControl } : {}),
     }, (err, data) => (err ? reject(err) : resolve(data)));
   });
 }
@@ -182,6 +208,32 @@ async function inspectVideo(filePath, previewPath) {
   return duration;
 }
 
+async function createAssetPreview(type, filePath, objectKey, warningLabel = '') {
+  const previewPath = `${filePath}.jpg`;
+  let durationSeconds = null;
+  try {
+    if (type === 'video') {
+      durationSeconds = await inspectVideo(filePath, previewPath);
+    } else if (type === 'image') {
+      await execFileAsync(
+        ffmpegPath,
+        ['-y', '-i', filePath, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', previewPath],
+        { timeout: 60000 },
+      );
+    } else {
+      return { thumbKey: null, durationSeconds: null };
+    }
+    const thumbKey = `${objectKey}.jpg`;
+    await putObject(thumbKey, previewPath, 'image/jpeg', mediaCacheControl);
+    return { thumbKey, durationSeconds };
+  } catch (error) {
+    console.warn(`${warningLabel || type} preview generation skipped:`, error.message);
+    return { thumbKey: null, durationSeconds: null };
+  } finally {
+    await fsp.unlink(previewPath).catch(() => {});
+  }
+}
+
 function parseTags(value) {
   if (Array.isArray(value)) return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))].slice(0, 30);
   try {
@@ -241,19 +293,9 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
   let thumbKey = null;
   try {
     await putObject(objectKey, tempPath, mimeType);
-    let durationSeconds = null;
-    if (type === 'video') {
-      const previewPath = `${tempPath}.jpg`;
-      try {
-        durationSeconds = await inspectVideo(tempPath, previewPath);
-        thumbKey = `${objectKey}.jpg`;
-        await putObject(thumbKey, previewPath, 'image/jpeg');
-      } catch (error) {
-        console.warn('Video preview generation skipped:', error.message);
-      } finally {
-        await fsp.unlink(previewPath).catch(() => {});
-      }
-    }
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Imported asset');
+    thumbKey = preview.thumbKey;
+    const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
     const client = await pool.connect();
     try {
@@ -301,19 +343,9 @@ function assetTypeFromMime(mimeType) {
 async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
   let thumbKey = null;
   try {
-    let durationSeconds = null;
-    if (type === 'video') {
-      const previewPath = `${tempPath}.jpg`;
-      try {
-        durationSeconds = await inspectVideo(tempPath, previewPath);
-        thumbKey = `${objectKey}.jpg`;
-        await putObject(thumbKey, previewPath, 'image/jpeg');
-      } catch (error) {
-        console.warn('Video preview generation skipped:', error.message);
-      } finally {
-        await fsp.unlink(previewPath).catch(() => {});
-      }
-    }
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Uploaded asset');
+    thumbKey = preview.thumbKey;
+    const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
     const client = await pool.connect();
     try {
@@ -350,8 +382,8 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
 
 async function hydrateAsset(row) {
   const [url, thumbUrl] = await Promise.all([
-    row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream`) : objectUrl(row.object_key),
-    row.thumb_key ? objectUrl(row.thumb_key) : Promise.resolve(''),
+    row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`) : objectUrl(row.object_key),
+    row.thumb_key ? Promise.resolve(stableSignedUrl(row.thumb_key)) : Promise.resolve(''),
   ]);
   return {
     id: row.id,
@@ -474,13 +506,13 @@ async function albumCoverMap(userId, assetIds) {
   const covers = new Map();
   if (!ids.length) return covers;
   const { rows } = await pool.query(
-    'SELECT id, type, object_key, thumb_key FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
+    'SELECT id, type, object_key, thumb_key, sha256 FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
     [userId, ids],
   );
   await Promise.all(rows.map(async (row) => {
     const [src, thumb] = await Promise.all([
-      row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream`) : objectUrl(row.object_key),
-      row.thumb_key ? objectUrl(row.thumb_key) : Promise.resolve(''),
+      row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`) : objectUrl(row.object_key),
+      row.thumb_key ? Promise.resolve(stableSignedUrl(row.thumb_key)) : Promise.resolve(''),
     ]);
     covers.set(row.id, { id: row.id, src, thumb });
   }));
@@ -587,7 +619,7 @@ function publicVideoAccount(row) {
 
 async function publicVideoAccountWithAvatar(row) {
   const account = publicVideoAccount(row);
-  account.avatarUrl = row.avatar_key ? await objectUrl(row.avatar_key) : '';
+  account.avatarUrl = row.avatar_key ? stableSignedUrl(row.avatar_key) : '';
   return account;
 }
 
@@ -752,8 +784,8 @@ app.post('/api/video-accounts/avatar-upload', requireUser, (req, res, next) => {
     previewPath = `${tempPath}.jpg`;
     await execFileAsync(ffmpegPath, ['-y', '-i', tempPath, '-vf', 'scale=256:256:force_original_aspect_ratio=increase,crop=256:256', '-frames:v', '1', '-q:v', '4', previewPath], { timeout: 60000 });
     const avatarKey = `${req.user.id}/avatars/${crypto.randomUUID()}.jpg`;
-    await putObject(avatarKey, previewPath, 'image/jpeg');
-    const avatarUrl = await objectUrl(avatarKey);
+    await putObject(avatarKey, previewPath, 'image/jpeg', mediaCacheControl);
+    const avatarUrl = stableSignedUrl(avatarKey);
     res.status(201).json({ avatarKey, avatarUrl });
   } catch (error) {
     next(error);
@@ -1021,8 +1053,8 @@ app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
   try {
     const row = await assetQuery(req.params.id, req.user.id);
     if (!row) return res.status(404).json({ error: '素材不存在' });
-    const metadata = await headObject(row.object_key);
-    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    const total = Number(row.size_bytes || 0);
+    if (!total) return res.status(404).json({ error: '素材文件大小无效' });
     const range = req.headers.range;
     let start = 0;
     let end = Math.max(0, total - 1);
@@ -1044,6 +1076,8 @@ app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
       'Content-Length': String(length),
       'Accept-Ranges': 'bytes',
       'Content-Disposition': 'inline',
+      'Cache-Control': streamCacheControl,
+      ...(row.sha256 ? { ETag: `"${row.sha256}"` } : {}),
       ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
     });
     const headers = range ? { Range: `bytes=${start}-${end}` } : {};
@@ -1234,20 +1268,10 @@ async function applyAssetFileReplacement({ userId, assetId, current, tempPath, o
     throw Object.assign(new Error(`只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件`), { statusCode: 400 });
   }
   let thumbKey = null;
-  let durationSeconds = null;
   try {
-    if (type === 'video') {
-      const previewPath = `${tempPath}.jpg`;
-      try {
-        durationSeconds = await inspectVideo(tempPath, previewPath);
-        thumbKey = `${objectKey}.jpg`;
-        await putObject(thumbKey, previewPath, 'image/jpeg');
-      } catch (error) {
-        console.warn('Replacement video preview generation skipped:', error.message);
-      } finally {
-        await fsp.unlink(previewPath).catch(() => {});
-      }
-    }
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Replacement asset');
+    thumbKey = preview.thumbKey;
+    const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
     const { rows } = await pool.query(
       `UPDATE assets
@@ -1876,8 +1900,8 @@ app.get('/api/music-tracks/:id/stream', requireUser, async (req, res, next) => {
     const { rows } = await pool.query('SELECT * FROM music_tracks WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
     const row = rows[0];
     if (!row) return res.status(404).json({ error: '音乐不存在' });
-    const metadata = await headObject(row.object_key);
-    const total = Number(metadata.headers?.['content-length'] || row.size_bytes || 0);
+    const total = Number(row.size_bytes || 0);
+    if (!total) return res.status(404).json({ error: '音乐文件大小无效' });
     const range = req.headers.range;
     let start = 0;
     let end = Math.max(0, total - 1);
@@ -1896,6 +1920,8 @@ app.get('/api/music-tracks/:id/stream', requireUser, async (req, res, next) => {
       'Content-Length': String(length),
       'Accept-Ranges': 'bytes',
       'Content-Disposition': 'inline',
+      'Cache-Control': streamCacheControl,
+      ...(row.sha256 ? { ETag: `"${row.sha256}"` } : {}),
       ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
     });
     cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Headers: range ? { Range: `bytes=${start}-${end}` } : {}, Output: res }, (error) => {
