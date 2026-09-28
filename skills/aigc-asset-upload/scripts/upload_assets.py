@@ -279,9 +279,11 @@ def main():
             origin = "已存在素材" if digest in existing_assets else "本批次已上传"
             print(f"[{index}/{len(files)}] 跳过：{file_path.name} -> {origin}「{duplicate_name}」({duplicate_id})")
             continue
-        name = args.name
-        if name and len(files) > 1:
-            name = f"{name} · {file_path.stem}"
+        # 服务端在 name 为空时回退用 multipart 文件名，而 multer 按 latin1 解码
+        # 文件名 header，中文文件名会变乱码；显式传表单字段 name 避免。
+        name = args.name or file_path.stem
+        if args.name and len(files) > 1:
+            name = f"{args.name} · {file_path.stem}"
         metadata = {
             "name": name,
             "source": args.source,
