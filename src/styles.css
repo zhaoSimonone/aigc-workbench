@@ -1051,6 +1051,33 @@ button {
   color: #929a96;
   font-size: 10px;
 }
+.account-search-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  padding: 0 13px;
+  border: 1px solid #e0e1dc;
+  border-radius: 8px;
+  background: #fff;
+  color: #929a96;
+}
+.account-search-box:focus-within {
+  border-color: #2e6f5e;
+}
+.account-search-box input {
+  width: 200px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #2e3433;
+  font-size: 13px;
+}
+.account-search-box button {
+  display: inline-flex;
+  align-items: center;
+  color: #929a96;
+}
 .video-account-actions {
   display: flex;
   gap: 3px;
