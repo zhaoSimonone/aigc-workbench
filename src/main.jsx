@@ -479,6 +479,7 @@ function Workspace({ user, onLogout }) {
   const progressTickRef = useRef(0);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [avatarPreview, setAvatarPreview] = useState(null);
+  const [accountQuery, setAccountQuery] = useState("");
   const [showVideoAccountModal, setShowVideoAccountModal] = useState(false);
   const [editingVideoAccount, setEditingVideoAccount] = useState(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
@@ -639,6 +640,13 @@ function Workspace({ user, onLogout }) {
       })
       .sort((a, b) => a.name.localeCompare(b.name, "zh"));
   }, [filteredAssets, characterAlbums, activeFolder, activeCharacter]);
+  const visibleVideoAccounts = useMemo(() => {
+    const query = accountQuery.trim().toLowerCase();
+    if (!query) return videoAccounts;
+    return videoAccounts.filter((account) =>
+      `${account.accountName || ""} ${account.note || ""}`.toLowerCase().includes(query),
+    );
+  }, [videoAccounts, accountQuery]);
   const updateAsset = async (id, patch) => {
     try {
       const payload = await apiFetch(`/assets/${id}`, {
@@ -1237,6 +1245,21 @@ function Workspace({ user, onLogout }) {
               <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : "把灵感收好，下一条作品会更快开始。"}</p>
             </div>
             <div className="intro-actions">
+              {isVideoAccountView && (
+                <label className="account-search-box">
+                  <Search size={15} />
+                  <input
+                    value={accountQuery}
+                    onChange={(event) => setAccountQuery(event.target.value)}
+                    placeholder="搜索账号名称或备注"
+                  />
+                  {accountQuery && (
+                    <button type="button" onClick={() => setAccountQuery("")} aria-label="清除搜索">
+                      <X size={13} />
+                    </button>
+                  )}
+                </label>
+              )}
               {isPromptView ? (
                 <button className="primary-button" onClick={() => setShowPromptModal(true)}>
                   <Plus size={18} />
@@ -1313,7 +1336,9 @@ function Workspace({ user, onLogout }) {
                     {isPromptView
                       ? `${prompts.length} 条提示词`
                       : isVideoAccountView
-                      ? `${videoAccounts.length} 个账号`
+                      ? accountQuery.trim()
+                        ? `${visibleVideoAccounts.length} / ${videoAccounts.length} 个账号`
+                        : `${videoAccounts.length} 个账号`
                       : isMusicView
                       ? `${musicTracks.length} 首音乐`
                       : isRoleAlbumView
@@ -1357,14 +1382,23 @@ function Workspace({ user, onLogout }) {
               onOpenAsset={openAsset}
             />
           ) : isVideoAccountView ? (
-            <VideoAccountsPanel
-              accounts={videoAccounts}
-              loading={loadingVideoAccounts}
-              onCreate={() => setShowVideoAccountModal(true)}
-              onEdit={(account) => setEditingVideoAccount(account)}
-              onDelete={deleteVideoAccount}
-              onAvatarPreview={setAvatarPreview}
-            />
+            visibleVideoAccounts.length ? (
+              <VideoAccountsPanel
+                accounts={visibleVideoAccounts}
+                loading={loadingVideoAccounts}
+                onCreate={() => setShowVideoAccountModal(true)}
+                onEdit={(account) => setEditingVideoAccount(account)}
+                onDelete={deleteVideoAccount}
+                onAvatarPreview={setAvatarPreview}
+              />
+            ) : (
+              <div className="empty-state">
+                <div className="empty-icon"><Search size={22} /></div>
+                <h3>没有匹配的账号</h3>
+                <p>{`没有名称或备注包含“${accountQuery.trim()}”的账号`}</p>
+                <button className="secondary-button" onClick={() => setAccountQuery("")}>清除搜索</button>
+              </div>
+            )
           ) : isMusicView ? (
             <MusicLibraryPanel
               tracks={musicTracks}
