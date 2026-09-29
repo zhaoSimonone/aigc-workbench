@@ -242,6 +242,27 @@ async function apiFetch(path, options = {}) {
   return payload;
 }
 
+function assetCacheKey(userId) {
+  return `aigc-shelf:assets:v1:${userId}`;
+}
+
+function readAssetCache(userId) {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(assetCacheKey(userId)) || "null");
+    return Array.isArray(cached?.assets) ? cached.assets : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAssetCache(userId, assets) {
+  try {
+    sessionStorage.setItem(assetCacheKey(userId), JSON.stringify({ assets }));
+  } catch {
+    // 缓存仅用于加速首屏；空间不足或隐私模式下不可用时不影响正常加载。
+  }
+}
+
 function normaliseAsset(asset) {
   const created = asset.date ? new Date(asset.date) : null;
   const tones = ["coral", "yellow", "indigo", "mint", "blue", "violet", "orange", "rose"];
@@ -451,12 +472,15 @@ function AuthScreen({ onAuth }) {
 }
 
 function Workspace({ user, onLogout }) {
-  const [assets, setAssets] = useState([]);
+  // 刷新时先展示当前用户上一次成功加载的素材快照，再后台拉取最新数据。
+  // 这不会替代服务端请求，只是把“空白加载态”变成 stale-while-revalidate。
+  const [cachedAssetRows] = useState(() => readAssetCache(user.id));
+  const [assets, setAssets] = useState(() => (cachedAssetRows || []).map(normaliseAsset));
   const [characterAlbums, setCharacterAlbums] = useState([]);
   const [videoAccounts, setVideoAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [musicTracks, setMusicTracks] = useState([]);
-  const [loadingAssets, setLoadingAssets] = useState(true);
+  const [loadingAssets, setLoadingAssets] = useState(() => !cachedAssetRows);
   const [loadingVideoAccounts, setLoadingVideoAccounts] = useState(true);
   const [loadingPrompts, setLoadingPrompts] = useState(true);
   const [loadingMusicTracks, setLoadingMusicTracks] = useState(true);
@@ -501,27 +525,64 @@ function Workspace({ user, onLogout }) {
   };
 
   useEffect(() => {
-    Promise.all([
-      apiFetch("/assets"),
-      apiFetch("/character-albums"),
-      apiFetch("/video-accounts"),
-      apiFetch("/prompts"),
-      apiFetch("/music-tracks").catch(() => ({ tracks: [] })),
-    ])
-      .then(([assetPayload, albumPayload, accountPayload, promptPayload, musicPayload]) => {
-        setAssets((assetPayload.assets || []).map(normaliseAsset));
-        setCharacterAlbums(albumPayload.albums || []);
-        setVideoAccounts(accountPayload.accounts || []);
-        setPrompts(promptPayload.prompts || []);
-        setMusicTracks(musicPayload.tracks || []);
+    let mounted = true;
+    const reportError = (label, error) => {
+      if (mounted) setLoadError(`${label}加载失败：${error.message}`);
+    };
+
+    // 素材列表是首屏主内容，单独完成加载，不能被提示词、音乐库等次要接口阻塞。
+    apiFetch("/assets")
+      .then((payload) => {
+        const rows = payload.assets || [];
+        writeAssetCache(user.id, rows);
+        if (mounted) setAssets(rows.map(normaliseAsset));
       })
-      .catch((error) => setLoadError(error.message))
+      .catch((error) => {
+        if (!cachedAssetRows) reportError("素材", error);
+      })
       .finally(() => {
-        setLoadingAssets(false);
-        setLoadingVideoAccounts(false);
-        setLoadingPrompts(false);
-        setLoadingMusicTracks(false);
+        if (mounted) setLoadingAssets(false);
       });
+
+    apiFetch("/character-albums")
+      .then((payload) => {
+        if (mounted) setCharacterAlbums(payload.albums || []);
+      })
+      .catch((error) => reportError("角色相册", error));
+
+    apiFetch("/video-accounts")
+      .then((payload) => {
+        if (mounted) setVideoAccounts(payload.accounts || []);
+      })
+      .catch((error) => reportError("视频账号", error))
+      .finally(() => {
+        if (mounted) setLoadingVideoAccounts(false);
+      });
+
+    apiFetch("/prompts")
+      .then((payload) => {
+        if (mounted) setPrompts(payload.prompts || []);
+      })
+      .catch((error) => reportError("提示词库", error))
+      .finally(() => {
+        if (mounted) setLoadingPrompts(false);
+      });
+
+    apiFetch("/music-tracks")
+      .then((payload) => {
+        if (mounted) setMusicTracks(payload.tracks || []);
+      })
+      .catch(() => {
+        // 音乐库是可选数据，接口失败时不阻塞其他首屏内容。
+        if (mounted) setMusicTracks([]);
+      })
+      .finally(() => {
+        if (mounted) setLoadingMusicTracks(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
