@@ -247,6 +247,25 @@ function safeName(name) {
   return String(name || '未命名素材').replace(/[\\\\/]+/g, '_').slice(0, 180) || '未命名素材';
 }
 
+// multer/busboy 默认按 latin1 解码 multipart 文件名，浏览器发送的 UTF-8 中文会变成乱码。
+// 还原方式：把 latin1 字符串还原为原始字节，仅当这些字节恰好是合法 UTF-8 时才解码；
+// 已经正确的非 ASCII 文件名经此函数原样返回（latin1 编码会破坏高位字符，往返校验不通过）。
+function decodeMultipartFilename(name) {
+  if (!name || !/[^\x00-\x7F]/.test(name)) return name;
+  const bytes = Buffer.from(name, 'latin1');
+  const decoded = bytes.toString('utf8');
+  return bytes.equals(Buffer.from(decoded, 'utf8')) ? decoded : name;
+}
+
+// 下载文件名：优先使用素材名称（用户可见、编码正确），扩展名取自对象键；
+// 对象键里的原始文件名可能来自旧版 latin1 误解码，仅作兜底。
+function downloadFilename(row) {
+  const keyExtension = path.extname(row.object_key) || (row.type === 'video' ? '.mp4' : '');
+  const assetBase = safeName(row.name);
+  if (path.extname(assetBase)) return assetBase;
+  return `${assetBase}${keyExtension}`;
+}
+
 function remoteMimeType(url, contentType) {
   const normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
   if (normalized.startsWith('video/')) return normalized;
@@ -1094,8 +1113,7 @@ app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
     const row = await assetQuery(req.params.id, req.user.id);
     if (!row) return res.status(404).json({ error: '素材不存在' });
     if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
-    const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
-    const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
+    const filename = downloadFilename(row);
     const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
     // 302 到预签名 COS 直链，绕过本机带宽中转；签名覆盖 response-content-disposition 以强制浏览器下载，
     // 并把类型覆盖为 octet-stream，避免移动端浏览器把视频嗅探进“边下边播”通道
@@ -1123,8 +1141,7 @@ app.get('/api/assets/:id/download-url', requireUser, async (req, res, next) => {
     const row = await assetQuery(req.params.id, req.user.id);
     if (!row) return res.status(404).json({ error: '素材不存在' });
     if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
-    const objectFilename = path.basename(row.object_key).replace(/^[0-9a-f-]{36}-/i, '');
-    const filename = objectFilename || `${safeName(row.name)}${row.type === 'video' ? '.mp4' : ''}`;
+    const filename = downloadFilename(row);
     const encodedFilename = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
     const url = await new Promise((resolve, reject) => {
       cos.getObjectUrl({
@@ -1154,8 +1171,9 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     if (!req.file) return res.status(400).json({ error: '请选择文件' });
     const type = assetTypeFromMime(req.file.mimetype);
     if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
-    const name = safeName(String(req.body.name || path.basename(req.file.originalname, path.extname(req.file.originalname))));
-    const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
+    const originalFilename = decodeMultipartFilename(req.file.originalname);
+    const name = safeName(String(req.body.name || path.basename(originalFilename, path.extname(originalFilename))));
+    const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalFilename)}`;
     await putObject(objectKey, tempPath, req.file.mimetype);
     const asset = await ingestAsset({
       userId: req.user.id,
@@ -1305,7 +1323,7 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
     const type = assetTypeFromMime(req.file.mimetype);
     if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
     if (type !== current.type) return res.status(400).json({ error: `只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件` });
-    uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(req.file.originalname)}`;
+    uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(decodeMultipartFilename(req.file.originalname))}`;
     await putObject(uploadedKey, tempPath, req.file.mimetype);
     const asset = await applyAssetFileReplacement({
       userId: req.user.id,
