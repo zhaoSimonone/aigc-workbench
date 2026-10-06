@@ -52,6 +52,29 @@ import "./styles.css";
 const media = "/media/";
 const API_BASE = "/api";
 const LIBRARY_FOLDERS = ["灵感收集", "我的创作", "角色设定", "项目资料"];
+
+// 工作台各页签的地址路径：/inspiration → 灵感收集；无路径（/）→ 全部素材
+const FOLDER_ROUTES = [
+  ["", "全部素材"],
+  ["inspiration", "灵感收集"],
+  ["creations", "我的创作"],
+  ["characters", "角色设定"],
+  ["projects", "项目资料"],
+  ["prompts", "提示词库"],
+  ["accounts", "视频账号"],
+  ["music", "音乐库"],
+];
+
+function folderFromPath(pathname) {
+  const slug = String(pathname || "/").replace(/^\/+|\/+$/g, "");
+  const match = FOLDER_ROUTES.find(([slugName]) => slugName === slug);
+  return match ? match[1] : "全部素材";
+}
+
+function pathForFolder(folder) {
+  const match = FOLDER_ROUTES.find(([, name]) => name === folder);
+  return `/${match ? match[0] : ""}`;
+}
 const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
 const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
 const PROMPT_PLATFORMS = ["可灵", "即梦", "Runway", "剪映", "CapCut", "Sora", "Veo", "其他"];
@@ -487,7 +510,7 @@ function Workspace({ user, onLogout }) {
   const [buildingMusic, setBuildingMusic] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [activeFolder, setActiveFolder] = useState("全部素材");
+  const [activeFolder, setActiveFolder] = useState(() => folderFromPath(window.location.pathname));
   const [activeCharacter, setActiveCharacter] = useState("");
   const [activeCharacterCategory, setActiveCharacterCategory] = useState("");
   const [activeFilter, setActiveFilter] = useState("全部");
@@ -595,6 +618,23 @@ function Workspace({ user, onLogout }) {
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
+  }, []);
+
+  // 地址栏与当前页签双向同步：切换页签更新路径；浏览器前进/后退切换页签
+  useEffect(() => {
+    const slug = window.location.pathname.replace(/^\/+|\/+$/g, "");
+    const known = FOLDER_ROUTES.some(([slugName]) => slugName === slug);
+    const target = pathForFolder(activeFolder);
+    if (!known) {
+      window.history.replaceState({}, "", target);
+      return;
+    }
+    if (window.location.pathname !== target) window.history.pushState({}, "", target);
+  }, [activeFolder]);
+  useEffect(() => {
+    const onPopState = () => setActiveFolder(folderFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   const folderItems = useMemo(
