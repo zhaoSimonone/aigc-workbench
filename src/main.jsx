@@ -75,6 +75,30 @@ function pathForFolder(folder) {
   const match = FOLDER_ROUTES.find(([, name]) => name === folder);
   return `/${match ? match[0] : ""}`;
 }
+
+// 快捷入口视图：/favorites → 我的收藏；/used → 已使用素材
+const QUICK_ROUTE_FILTERS = { favorites: "已收藏", used: "已使用" };
+
+function viewFromPath(pathname) {
+  const slug = String(pathname || "/").replace(/^\/+|\/+$/g, "");
+  if (QUICK_ROUTE_FILTERS[slug]) {
+    return { folder: "全部素材", filter: QUICK_ROUTE_FILTERS[slug] };
+  }
+  return { folder: folderFromPath(pathname), filter: null };
+}
+
+function pathForView(folder, filter) {
+  if (folder === "全部素材") {
+    for (const [slug, filterName] of Object.entries(QUICK_ROUTE_FILTERS)) {
+      if (filter === filterName) return `/${slug}`;
+    }
+  }
+  return pathForFolder(folder);
+}
+
+function isKnownViewSlug(slug) {
+  return FOLDER_ROUTES.some(([slugName]) => slugName === slug) || Boolean(QUICK_ROUTE_FILTERS[slug]);
+}
 const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
 const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
 const PROMPT_PLATFORMS = ["可灵", "即梦", "Runway", "剪映", "CapCut", "Sora", "Veo", "其他"];
@@ -510,10 +534,11 @@ function Workspace({ user, onLogout }) {
   const [buildingMusic, setBuildingMusic] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [activeFolder, setActiveFolder] = useState(() => folderFromPath(window.location.pathname));
+  const initialView = viewFromPath(window.location.pathname);
+  const [activeFolder, setActiveFolder] = useState(() => initialView.folder);
   const [activeCharacter, setActiveCharacter] = useState("");
   const [activeCharacterCategory, setActiveCharacterCategory] = useState("");
-  const [activeFilter, setActiveFilter] = useState("全部");
+  const [activeFilter, setActiveFilter] = useState(() => initialView.filter || "全部");
   const [activeTag, setActiveTag] = useState("");
   const [tagOpen, setTagOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -620,19 +645,22 @@ function Workspace({ user, onLogout }) {
     };
   }, []);
 
-  // 地址栏与当前页签双向同步：切换页签更新路径；浏览器前进/后退切换页签
+  // 地址栏与当前视图双向同步：切换页签/筛选更新路径；浏览器前进/后退切换视图
   useEffect(() => {
     const slug = window.location.pathname.replace(/^\/+|\/+$/g, "");
-    const known = FOLDER_ROUTES.some(([slugName]) => slugName === slug);
-    const target = pathForFolder(activeFolder);
-    if (!known) {
+    const target = pathForView(activeFolder, activeFilter);
+    if (!isKnownViewSlug(slug)) {
       window.history.replaceState({}, "", target);
       return;
     }
     if (window.location.pathname !== target) window.history.pushState({}, "", target);
-  }, [activeFolder]);
+  }, [activeFolder, activeFilter]);
   useEffect(() => {
-    const onPopState = () => setActiveFolder(folderFromPath(window.location.pathname));
+    const onPopState = () => {
+      const view = viewFromPath(window.location.pathname);
+      setActiveFolder(view.folder);
+      setActiveFilter(view.filter || "全部");
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
