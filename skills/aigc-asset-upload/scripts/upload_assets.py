@@ -217,6 +217,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Upload local AIGC assets to AIGC Shelf")
     parser.add_argument("files", nargs="+", type=Path, help="要上传的视频或图片路径")
     parser.add_argument("--name", default="", help="素材名称；多文件时自动追加原文件名")
+    parser.add_argument("--name-map", default="", help="逐文件标题映射文件，每行 `路径|标题`，优先于 --name")
     parser.add_argument("--source", default="本地导入")
     parser.add_argument("--source-url", default="")
     parser.add_argument("--tags", default="待整理", help="以空格或逗号分隔")
@@ -228,6 +229,35 @@ def parse_args():
     parser.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", DEFAULT_API))
     parser.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", str(DEFAULT_COOKIE_FILE)))
     return parser.parse_args()
+
+
+def load_name_map(map_path):
+    """读取 `路径|标题` 映射文件；路径统一为绝对路径，供逐文件自定义标题。"""
+    mapping = {}
+    for lineno, line in enumerate(Path(map_path).expanduser().read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        if "|" not in line:
+            print(f"忽略：名称映射第 {lineno} 行缺少 | 分隔：{line}", file=sys.stderr)
+            continue
+        path_text, name = line.split("|", 1)
+        path_text, name = path_text.strip(), name.strip()
+        if not path_text or not name:
+            print(f"忽略：名称映射第 {lineno} 行路径或标题为空", file=sys.stderr)
+            continue
+        mapping[os.path.abspath(os.path.expanduser(path_text))] = name
+    return mapping
+
+
+def resolve_title(file_path, name_map, base_name, total):
+    """标题优先级：映射文件 > --name > 原文件名。"""
+    map_name = name_map.get(os.path.abspath(os.path.expanduser(str(file_path))))
+    if map_name:
+        return map_name
+    if base_name:
+        return f"{base_name} · {file_path.stem}" if total > 1 else base_name
+    return file_path.stem
 
 
 def file_sha256(file_path):
@@ -248,6 +278,11 @@ def main():
         files.append(path)
     if not files:
         raise SystemExit("没有可上传的文件")
+    name_map = load_name_map(args.name_map) if args.name_map else {}
+    if name_map:
+        canonical_files = {os.path.abspath(os.path.expanduser(str(p))) for p in files}
+        for path_text in sorted(set(name_map) - canonical_files):
+            print(f"提示：名称映射中的路径不在待上传列表：{path_text}", file=sys.stderr)
     client = Client(args.api, args.cookie_file)
     user = client.ensure_login()
     print(f"已登录：{user.get('name') or user.get('email') or '当前账号'}")
@@ -281,9 +316,7 @@ def main():
             continue
         # 服务端在 name 为空时回退用 multipart 文件名，而 multer 按 latin1 解码
         # 文件名 header，中文文件名会变乱码；显式传表单字段 name 避免。
-        name = args.name or file_path.stem
-        if args.name and len(files) > 1:
-            name = f"{args.name} · {file_path.stem}"
+        name = resolve_title(file_path, name_map, args.name, len(files))
         metadata = {
             "name": name,
             "source": args.source,
