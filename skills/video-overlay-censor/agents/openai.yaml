@@ -1,0 +1,3 @@
+interface:
+  display_name: "Video Overlay Censor"
+  short_description: "Apply a tracked GIF cover to a video"
