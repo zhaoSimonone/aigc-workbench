@@ -362,6 +362,7 @@ function normaliseAsset(asset) {
 function formatAssetDate(date) {
   const diff = Date.now() - date.getTime();
   if (diff < 60 * 1000) return "刚刚";
+  if (diff < 60 * 60 * 1000) return `${Math.max(1, Math.floor(diff / (60 * 1000)))} 分钟前`;
   if (diff < 24 * 60 * 60 * 1000) return `${Math.max(1, Math.floor(diff / (60 * 60 * 1000)))} 小时前`;
   return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
