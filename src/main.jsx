@@ -289,6 +289,33 @@ async function apiFetch(path, options = {}) {
   return payload;
 }
 
+const SESSION_CACHE_KEY = "aigc-shelf:session:v1";
+
+function readSessionCache() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(SESSION_CACHE_KEY) || "null");
+    return cached?.id && cached?.email ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionCache(user) {
+  try {
+    sessionStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(user));
+  } catch {
+    // 登录态缓存仅用于减少首屏等待，写入失败不影响鉴权。
+  }
+}
+
+function clearSessionCache() {
+  try {
+    sessionStorage.removeItem(SESSION_CACHE_KEY);
+  } catch {
+    // 隐私模式下 sessionStorage 可能不可用。
+  }
+}
+
 function assetCacheKey(userId) {
   return `aigc-shelf:assets:v1:${userId}`;
 }
@@ -340,21 +367,32 @@ function formatAssetDate(date) {
 }
 
 function App() {
-  const [session, setSession] = useState(null);
-  const [checking, setChecking] = useState(true);
+  // 先用上一次成功鉴权的轻量用户快照挂载工作台，同时后台校验 HttpOnly Cookie。
+  // 这样移动端不会因为一次 TLS/数据库往返而停在整屏空白加载态。
+  const [cachedSession] = useState(() => readSessionCache());
+  const [session, setSession] = useState(cachedSession);
+  const [checking, setChecking] = useState(!cachedSession);
   useEffect(() => {
     apiFetch("/auth/me")
-      .then((payload) => setSession(payload.user))
-      .catch(() => setSession(null))
+      .then((payload) => {
+        writeSessionCache(payload.user);
+        setSession(payload.user);
+      })
+      .catch(() => {
+        clearSessionCache();
+        setSession(null);
+      })
       .finally(() => setChecking(false));
   }, []);
-  if (checking) return <div className="app-loading">正在连接素材库…</div>;
-  if (!session) return <AuthScreen onAuth={setSession} />;
+  if (!session && checking) return <div className="app-loading">正在连接素材库…</div>;
+  if (!session) return <AuthScreen onAuth={(user) => { writeSessionCache(user); setSession(user); }} />;
   return (
     <Workspace
+      key={session.id}
       user={session}
       onLogout={async () => {
         await apiFetch("/auth/logout", { method: "POST" }).catch(() => {});
+        clearSessionCache();
         setSession(null);
       }}
     />
