@@ -3639,3 +3639,50 @@ button {
     grid-column: auto;
   }
 }
+
+/* Keep the asset wall cheap to paint on mobile. Off-screen cards stay in the
+   layout, but their contents are not rendered until they approach the viewport. */
+.asset-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 360px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .asset-card,
+  .asset-preview img,
+  .play-chip {
+    transition: none;
+  }
+
+  .asset-card:hover,
+  .asset-card:hover .asset-preview img,
+  .asset-card:hover .play-chip {
+    transform: none;
+  }
+}
+
+@media (max-width: 760px) {
+  /* backdrop-filter creates a composited blur layer for every card. The
+     translucent color keeps the same hierarchy without making scroll janky. */
+  .type-pill,
+  .duration-pill,
+  .heart-button {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .content-wrap {
+    overflow-x: clip;
+    overflow-y: visible;
+  }
+}
+
+.asset-card-list {
+  contain-intrinsic-size: 96px;
+}
+
+@media (max-width: 760px) {
+  .asset-card {
+    contain-intrinsic-size: 285px;
+  }
+}

@@ -2538,6 +2538,44 @@ function formatAccountDate(value) {
   return date.toLocaleDateString("zh-CN", { year: "numeric", month: "numeric", day: "numeric" });
 }
 
+function LazyAssetImage({ src, alt, ...props }) {
+  const imageRef = useRef(null);
+  const [shouldLoad, setShouldLoad] = useState(false);
+
+  useEffect(() => {
+    if (!src) return undefined;
+    const node = imageRef.current;
+    if (!node) return undefined;
+    if (!("IntersectionObserver" in window)) {
+      setShouldLoad(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setShouldLoad(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "320px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [src]);
+
+  return (
+    <img
+      ref={imageRef}
+      src={shouldLoad ? src : undefined}
+      alt={alt}
+      loading="lazy"
+      decoding="async"
+      fetchPriority="low"
+      {...props}
+    />
+  );
+}
+
 function AssetCard({ asset, onOpen, onFavorite, list }) {
   return (
     <article
@@ -2547,14 +2585,14 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
       <div className={`asset-preview ${asset.color}`}>
         {asset.type === "video" ? (
           asset.thumb ? (
-            <img src={asset.thumb} alt={`${asset.name} 视频封面`} loading="lazy" decoding="async" />
+            <LazyAssetImage src={asset.thumb} alt={`${asset.name} 视频封面`} />
           ) : (
             <span className="asset-preview-placeholder">
               <FileVideo size={32} aria-label={`${asset.name} 暂无视频封面`} />
             </span>
           )
         ) : (
-          <img src={asset.thumb || asset.src} alt={asset.name} loading="lazy" decoding="async" />
+          <LazyAssetImage src={asset.thumb || asset.src} alt={asset.name} />
         )}
         {asset.type === "video" && (
           <div className="play-chip">
