@@ -93,7 +93,7 @@ async function generatePreview(input, output, type) {
   }
   const duration = await readVideoDuration(input);
   const seek = duration && duration > 0.2 ? await pickPreviewTime(input, duration) : 0;
-  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', input, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', output], { timeout: 120000 });
+  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', input, '-frames:v', '1', '-vf', 'scale=min\\(480\\,iw\\):-2', '-q:v', '4', output], { timeout: 120000 });
   return duration;
 }
 

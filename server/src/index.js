@@ -204,7 +204,7 @@ async function pickPreviewTime(filePath, duration) {
 async function inspectVideo(filePath, previewPath) {
   const duration = await readVideoDuration(filePath);
   const seek = duration && duration > 0.2 ? await pickPreviewTime(filePath, duration) : 0;
-  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(720\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
+  await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(480\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
   return duration;
 }
 
