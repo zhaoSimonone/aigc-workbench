@@ -360,7 +360,9 @@ function normaliseAsset(asset) {
 }
 
 function formatAssetDate(date) {
-  const diff = Date.now() - date.getTime();
+  // 将 ISO 字符串强制按 UTC 解析（不受浏览器本地时区设置影响），
+  // 避免数据库 UTC 时间与本地时区不匹配导致的 "X 小时前" 偏差。
+  const diff = Date.now() - new Date(date.toISOString()).getTime();
   if (diff < 60 * 1000) return "刚刚";
   if (diff < 60 * 60 * 1000) return `${Math.max(1, Math.floor(diff / (60 * 1000)))} 分钟前`;
   if (diff < 24 * 60 * 60 * 1000) return `${Math.max(1, Math.floor(diff / (60 * 60 * 1000)))} 小时前`;
