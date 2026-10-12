@@ -66,6 +66,138 @@ CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
 CREATE INDEX IF NOT EXISTS assets_user_sha256_idx ON assets(user_id, sha256) WHERE sha256 IS NOT NULL AND deleted_at IS NULL;
 
+-- 本地目录归档与工作文档备份
+-- 批次 = 一次扫描/导入；对象 = 去重后的实际二进制；归档文件 = 原始路径条目。
+-- 全部使用 IF NOT EXISTS，可重复执行；不修改 assets.type 的 image/video 约束。
+CREATE TABLE IF NOT EXISTS archive_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  source_root TEXT NOT NULL,
+  source_relative_root TEXT NOT NULL DEFAULT '',
+  storage_backend TEXT NOT NULL CHECK (storage_backend IN ('cos','local')),
+  status TEXT NOT NULL DEFAULT 'scanned'
+    CHECK (status IN ('scanned','queued','running','paused','completed','completed_with_errors','cancelled','failed')),
+  create_media_assets BOOLEAN NOT NULL DEFAULT false,
+  asset_folder TEXT NOT NULL DEFAULT '',
+  total_files INTEGER NOT NULL DEFAULT 0,
+  total_bytes BIGINT NOT NULL DEFAULT 0,
+  processed_files INTEGER NOT NULL DEFAULT 0,
+  processed_bytes BIGINT NOT NULL DEFAULT 0,
+  success_files INTEGER NOT NULL DEFAULT 0,
+  failed_files INTEGER NOT NULL DEFAULT 0,
+  skipped_files INTEGER NOT NULL DEFAULT 0,
+  current_relative_path TEXT NOT NULL DEFAULT '',
+  source_cleanup_status TEXT NOT NULL DEFAULT 'not_requested'
+    CHECK (source_cleanup_status IN ('not_requested','requested','completed','partial','failed')),
+  source_cleanup_requested_at TIMESTAMPTZ,
+  source_cleanup_completed_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS archive_batches_user_created_idx ON archive_batches(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS archive_batches_status_idx ON archive_batches(status) WHERE status IN ('queued','running','paused');
+
+CREATE TABLE IF NOT EXISTS archive_objects (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  storage_backend TEXT NOT NULL CHECK (storage_backend IN ('cos','local')),
+  object_key TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','uploading','available','verifying','failed')),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  reference_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  verified_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id, sha256, size_bytes, storage_backend)
+);
+CREATE INDEX IF NOT EXISTS archive_objects_user_key_idx ON archive_objects(user_id, object_key);
+
+CREATE TABLE IF NOT EXISTS archive_files (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id UUID NOT NULL REFERENCES archive_batches(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  object_id UUID REFERENCES archive_objects(id) ON DELETE SET NULL,
+  asset_id UUID REFERENCES assets(id) ON DELETE SET NULL,
+  source_path TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  name TEXT NOT NULL,
+  extension TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL CHECK (kind IN ('image','video','audio','document','archive','other')),
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes BIGINT NOT NULL DEFAULT 0,
+  source_mtime TIMESTAMPTZ,
+  sha256 TEXT,
+  status TEXT NOT NULL DEFAULT 'discovered'
+    CHECK (status IN ('discovered','hashing','queued','uploading','verifying','available','skipped','failed','source_deleted')),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  source_deleted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(batch_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS archive_files_user_created_idx ON archive_files(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS archive_files_batch_status_idx ON archive_files(batch_id, status);
+CREATE INDEX IF NOT EXISTS archive_files_user_sha256_idx ON archive_files(user_id, sha256) WHERE sha256 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS archive_files_user_kind_idx ON archive_files(user_id, kind);
+CREATE INDEX IF NOT EXISTS archive_files_user_relative_idx ON archive_files(user_id, relative_path);
+CREATE INDEX IF NOT EXISTS archive_files_object_idx ON archive_files(object_id);
+
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS archive_file_id UUID REFERENCES archive_files(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS assets_user_archive_file_idx ON assets(archive_file_id) WHERE archive_file_id IS NOT NULL;
+
+-- 百度网盘目录快照：工作台只保存网盘目录元数据，不保存任何文件字节，
+-- 也不保存百度 Token 或 dlink。文件同步由本机 MCP/CLI 直传网盘完成。
+CREATE TABLE IF NOT EXISTS netdisk_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  root_path TEXT NOT NULL DEFAULT '/AIGC',
+  source TEXT NOT NULL DEFAULT 'cli',
+  file_count INTEGER NOT NULL DEFAULT 0,
+  dir_count INTEGER NOT NULL DEFAULT 0,
+  total_bytes BIGINT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','stale','failed')),
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS netdisk_snapshots_user_created_idx ON netdisk_snapshots(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS netdisk_nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  snapshot_id UUID REFERENCES netdisk_snapshots(id) ON DELETE SET NULL,
+  fs_id BIGINT NOT NULL DEFAULT 0,
+  path TEXT NOT NULL,
+  parent_path TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  is_dir BOOLEAN NOT NULL DEFAULT false,
+  kind TEXT NOT NULL DEFAULT 'other'
+    CHECK (kind IN ('image','video','audio','document','archive','other','directory')),
+  size_bytes BIGINT NOT NULL DEFAULT 0,
+  server_mtime TIMESTAMPTZ,
+  category INTEGER NOT NULL DEFAULT 0,
+  local_state TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (local_state IN ('unknown','present','missing','size_mismatch')),
+  local_size_bytes BIGINT NOT NULL DEFAULT 0,
+  extra JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, path)
+);
+CREATE INDEX IF NOT EXISTS netdisk_nodes_user_parent_idx ON netdisk_nodes(user_id, parent_path);
+CREATE INDEX IF NOT EXISTS netdisk_nodes_user_dir_idx ON netdisk_nodes(user_id, is_dir);
+CREATE INDEX IF NOT EXISTS netdisk_nodes_user_kind_idx ON netdisk_nodes(user_id, kind);
+CREATE INDEX IF NOT EXISTS netdisk_nodes_user_name_idx ON netdisk_nodes(user_id, name);
+CREATE INDEX IF NOT EXISTS netdisk_nodes_user_size_idx ON netdisk_nodes(user_id, size_bytes DESC);
+
 CREATE TABLE IF NOT EXISTS music_tracks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
