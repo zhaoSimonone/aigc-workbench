@@ -115,7 +115,17 @@ function pathForView(folder, filter) {
 function isKnownViewSlug(slug) {
   return FOLDER_ROUTES.some(([slugName]) => slugName === slug) || Boolean(QUICK_ROUTE_FILTERS[slug]);
 }
-const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
+const CHARACTER_CATEGORIES = ["正脸", "发型", "场景照", "动作", "服装", "其他"];
+
+function isCharacterAlbumAsset(asset) {
+  if (asset.folder === "角色设定") return true;
+  return asset.folder === "发型库" && Boolean(asset.characterName);
+}
+
+function albumCategory(asset) {
+  if (asset.folder === "发型库") return asset.characterCategory || "发型";
+  return asset.characterCategory || "";
+}
 
 // 服装库 / 发型库 / 通用片段走同一套素材网格，只换文案、图标和空状态
 const SPECIAL_LIBRARY_COPY = {
@@ -128,7 +138,7 @@ const SPECIAL_LIBRARY_COPY = {
   },
   发型库: {
     icon: Scissors,
-    subtitle: "跨角色复用的发型参考，按发色和款式检索。",
+    subtitle: "跨角色复用的发型参考，按发色和款式检索。填了人物名的同一张图也会出现在人物相册。",
     emptyTitle: "还没有发型参考",
     emptyHint: "可以从角色设定迁出，也可以直接上传发型图。",
     emptyAction: "上传到发型库",
@@ -766,7 +776,7 @@ function Workspace({ user, onLogout }) {
       },
       {
         label: "角色设定",
-        count: assets.filter((item) => item.folder === "角色设定").length,
+        count: assets.filter((item) => isCharacterAlbumAsset(item)).length,
         icon: FileImage,
       },
       {
@@ -801,13 +811,17 @@ function Workspace({ user, onLogout }) {
     const result = assets.filter((asset) => {
       const inFolder =
         activeFolder === "全部素材" ||
-        (activeFolder === "我的创作" ? (asset.folder === "我的创作" || asset.folder === "成片") : asset.folder === activeFolder);
+        (activeFolder === "我的创作"
+          ? (asset.folder === "我的创作" || asset.folder === "成片")
+          : activeFolder === "角色设定"
+            ? isCharacterAlbumAsset(asset)
+            : asset.folder === activeFolder);
       const inCharacter =
         activeFolder !== "角色设定" ||
         !activeCharacter ||
         (activeCharacter === "待归类人物" || activeCharacter === "未命名角色" ? !asset.characterName : asset.characterName === activeCharacter);
       const inCharacterCategory =
-        activeFolder !== "角色设定" || !activeCharacterCategory || asset.characterCategory === activeCharacterCategory;
+        activeFolder !== "角色设定" || !activeCharacterCategory || albumCategory(asset) === activeCharacterCategory;
       const inType =
         activeFilter === "全部" ||
         (activeFilter === "视频" && asset.type === "video") ||
@@ -863,7 +877,7 @@ function Workspace({ user, onLogout }) {
           videoCount: group.assets.filter((asset) => asset.type === "video").length,
           imageCount: group.assets.filter((asset) => asset.type === "image").length,
           categoryCounts: group.assets.reduce((counts, asset) => {
-            const category = asset.characterCategory || "未分类";
+            const category = albumCategory(asset) || "未分类";
             counts[category] = (counts[category] || 0) + 1;
             return counts;
           }, {}),
@@ -1604,7 +1618,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isSpecialLibraryView ? specialLibrary.subtitle : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、发型、场景照等分类查看。发型图仍只保存一份，同时出现在发型库。" : isSpecialLibraryView ? specialLibrary.subtitle : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1775,7 +1789,7 @@ function Workspace({ user, onLogout }) {
                     const matchesCharacter = activeCharacter === "待归类人物" || activeCharacter === "未命名角色"
                       ? !item.characterName
                       : item.characterName === activeCharacter;
-                    return item.folder === "角色设定" && matchesCharacter && (!category ? true : item.characterCategory === category);
+                    return isCharacterAlbumAsset(item) && matchesCharacter && (!category ? true : albumCategory(item) === category);
                   }).length;
                   return (
                     <button
@@ -1941,7 +1955,7 @@ function Workspace({ user, onLogout }) {
           albumName={coverPickerAlbum.name}
           currentCoverAssetId={coverPickerAlbum.coverAssetId}
           assets={assets.filter(
-            (asset) => asset.characterName === coverPickerAlbum.name && asset.folder === "角色设定",
+            (asset) => asset.characterName === coverPickerAlbum.name && isCharacterAlbumAsset(asset),
           )}
           onClose={() => setCoverPickerAlbum(null)}
           onPick={(coverAssetId) => setAlbumCover(coverPickerAlbum.name, coverAssetId)}
@@ -3116,12 +3130,12 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
                 {asset.folder}
               </strong>
             </div>
-            {asset.folder === "角色设定" && (
+            {isCharacterAlbumAsset(asset) && (
               <div>
                 <span>人物素材分类</span>
                 <strong>
                   <FileImage size={14} />
-                  {asset.characterCategory || "未分类"}
+                  {albumCategory(asset) || "未分类"}
                 </strong>
               </div>
             )}
@@ -3222,6 +3236,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
       setError("请选择人物素材分类");
       return;
     }
+    const resolvedCategory = folder === "发型库" && characterName.trim() && !characterCategory ? "发型" : characterCategory;
     setSaving(true);
     setError("");
     try {
@@ -3231,7 +3246,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
         source: source.trim() || "本地导入",
         sourceUrl: sourceUrl.trim(),
         characterName: characterName.trim(),
-        characterCategory,
+        characterCategory: resolvedCategory,
         folder,
         note: note.trim(),
         used,
@@ -3290,7 +3305,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
           <label>
             人物名称
             <input value={characterName} onChange={(event) => setCharacterName(event.target.value)} placeholder="例如 林小栀" />
-            <small>选择“角色设定”时必填，同名会聚合到同一人物相册</small>
+            <small>角色设定必填；发型库填写后会同时出现在该人物相册，文件仍只保存一份</small>
           </label>
           <label>
             人物素材分类
@@ -3298,7 +3313,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
               <option value="">请选择分类</option>
               {CHARACTER_CATEGORIES.map((category) => <option key={category}>{category}</option>)}
             </select>
-            <small>例如正脸、场景照、动作或服装</small>
+            <small>例如正脸、发型、场景照、动作或服装</small>
           </label>
           <label className="edit-field-wide">
             原视频链接 / 参考链接
@@ -3443,6 +3458,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
       return;
     }
     setFormError("");
+    const resolvedCategory = folder === "发型库" && characterName.trim() && !characterCategory ? "发型" : characterCategory;
     const tags = tagsText
       .split(/[,，\s]+/)
       .map((tag) => tag.trim())
@@ -3452,7 +3468,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
           source: source.trim() || "本地导入",
           sourceUrl: sourceUrl.trim(),
           characterName: characterName.trim(),
-          characterCategory,
+          characterCategory: resolvedCategory,
       tags: tags.length ? tags : ["待整理"],
       used,
       folder,
@@ -3562,7 +3578,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
             />
             <small>多个标签用空格或逗号分隔</small>
           </label>
-          {folder === "角色设定" && (
+          {(folder === "角色设定" || folder === "发型库") && (
             <div className="character-upload-fields">
               <label>
                 人物相册
@@ -3589,7 +3605,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
                     placeholder="输入新人物名称，例如 林小栀"
                   />
                 )}
-                <small>先创建人物相册，再在相册中持续上传正脸、场景照等素材</small>
+                <small>{folder === "发型库" ? "可选。填写后这张发型图会同时出现在人物相册，文件只保存一份。" : "先创建人物相册，再在相册中持续上传正脸、场景照等素材"}</small>
               </label>
               <label>
                 人物素材分类
@@ -3597,7 +3613,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
                   <option value="">请选择分类</option>
                   {CHARACTER_CATEGORIES.map((category) => <option key={category}>{category}</option>)}
                 </select>
-                <small>例如正脸、场景照、动作或服装</small>
+                <small>例如正脸、发型、场景照、动作或服装</small>
               </label>
             </div>
           )}

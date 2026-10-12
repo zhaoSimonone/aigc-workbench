@@ -342,7 +342,7 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      if (folder === '角色设定' && characterName) {
+      if (characterName && (folder === '角色设定' || folder === '发型库')) {
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
@@ -392,7 +392,7 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      if (folder === '角色设定' && characterName) {
+      if (characterName && (folder === '角色设定' || folder === '发型库')) {
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
@@ -577,7 +577,7 @@ function albumQueryWhere(where, params) {
   return pool.query(
     `SELECT ca.id, ca.name, ca.created_at, ca.cover_asset_id, COUNT(a.id)::int AS asset_count
        FROM character_albums ca
-       LEFT JOIN assets a ON a.user_id=ca.user_id AND a.character_name=ca.name AND a.folder='角色设定' AND a.deleted_at IS NULL
+       LEFT JOIN assets a ON a.user_id=ca.user_id AND a.character_name=ca.name AND a.deleted_at IS NULL AND (a.folder='角色设定' OR a.folder='发型库')
       WHERE ${where}
       GROUP BY ca.id
       ORDER BY ca.created_at ASC, ca.name ASC`,
