@@ -224,34 +224,64 @@ async function pickPreviewTime(filePath, duration) {
   return best ? best.seek : 0;
 }
 
-async function inspectVideo(filePath, previewPath) {
-  const duration = await readVideoDuration(filePath);
+async function writeVideoPreview(filePath, previewPath) {
+  const duration = await readVideoDuration(filePath).catch((error) => {
+    console.warn('Video duration probe failed:', error.message);
+    return null;
+  });
   const seek = duration && duration > 0.2 ? await pickPreviewTime(filePath, duration) : 0;
   await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(480\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
   return duration;
 }
 
+async function renderPreviewImage(type, filePath, previewPath) {
+  if (type === 'image') {
+    await execFileAsync(
+      ffmpegPath,
+      ['-y', '-i', filePath, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', previewPath],
+      { timeout: 60000 },
+    );
+    return null;
+  }
+  return writeVideoPreview(filePath, previewPath);
+}
+
+// 抽帧偶发失败（临时文件 IO 竞争、ffmpeg 超时等）不应连坐掉时长，
+// 否则素材会永久停留在“待识别”且没有封面。渲染与上传各自独立兜底，
+// 渲染失败时再退回逐帧抽取，保证可用时仍能拿到封面。
 async function createAssetPreview(type, filePath, objectKey, warningLabel = '') {
   const previewPath = `${filePath}.jpg`;
   let durationSeconds = null;
   try {
-    if (type === 'video') {
-      durationSeconds = await inspectVideo(filePath, previewPath);
-    } else if (type === 'image') {
-      await execFileAsync(
-        ffmpegPath,
-        ['-y', '-i', filePath, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', previewPath],
-        { timeout: 60000 },
-      );
-    } else {
-      return { thumbKey: null, durationSeconds: null };
+    if (type !== 'video' && type !== 'image') return { thumbKey: null, durationSeconds: null };
+    try {
+      durationSeconds = await renderPreviewImage(type, filePath, previewPath);
+    } catch (error) {
+      console.warn(`${warningLabel || type} preview render failed, retrying without frame picking:`, error.message);
+      if (type === 'video') {
+        try {
+          durationSeconds = await readVideoDuration(filePath);
+          await execFileAsync(ffmpegPath, ['-y', '-i', filePath, '-frames:v', '1', '-vf', 'scale=min\\(480\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
+        } catch (retryError) {
+          console.warn(`${warningLabel || type} preview render failed again:`, retryError.message);
+        }
+      }
     }
+    // 渲染彻底失败时预览文件并不存在，此时不能上传，否则 COS 上会留下空对象、
+    // 数据库也会记上永远取不到图的 thumb_key。
+    const rendered = await fsp.stat(previewPath).then(() => true).catch(() => false);
+    if (!rendered) return { thumbKey: null, durationSeconds };
     const thumbKey = `${objectKey}.jpg`;
-    await putObject(thumbKey, previewPath, 'image/jpeg', mediaCacheControl);
+    try {
+      await putObject(thumbKey, previewPath, 'image/jpeg', mediaCacheControl);
+    } catch (error) {
+      console.warn(`${warningLabel || type} thumbnail upload skipped:`, error.message);
+      return { thumbKey: null, durationSeconds };
+    }
     return { thumbKey, durationSeconds };
   } catch (error) {
     console.warn(`${warningLabel || type} preview generation skipped:`, error.message);
-    return { thumbKey: null, durationSeconds: null };
+    return { thumbKey: null, durationSeconds };
   } finally {
     await fsp.unlink(previewPath).catch(() => {});
   }
