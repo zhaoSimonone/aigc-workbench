@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleCheck,
+  Clapperboard,
   Clock3,
   Cloud,
   Copy,
@@ -34,8 +35,10 @@ import {
   Pencil,
   Play,
   Plus,
+  Scissors,
   Search,
   Settings2,
+  Shirt,
   Share2,
   Sparkles,
   Tag,
@@ -52,7 +55,15 @@ import "./styles.css";
 
 const media = "/media/";
 const API_BASE = "/api";
-const LIBRARY_FOLDERS = ["灵感收集", "我的创作", "角色设定", "项目资料"];
+const LIBRARY_FOLDERS = [
+  "灵感收集",
+  "我的创作",
+  "角色设定",
+  "服装库",
+  "发型库",
+  "通用片段",
+  "项目资料",
+];
 
 // 工作台各页签的地址路径：/inspiration → 灵感收集；无路径（/）→ 全部素材
 const FOLDER_ROUTES = [
@@ -60,6 +71,9 @@ const FOLDER_ROUTES = [
   ["inspiration", "灵感收集"],
   ["creations", "我的创作"],
   ["characters", "角色设定"],
+  ["outfits", "服装库"],
+  ["hairstyles", "发型库"],
+  ["clips", "通用片段"],
   ["projects", "项目资料"],
   ["prompts", "提示词库"],
   ["accounts", "视频账号"],
@@ -102,6 +116,31 @@ function isKnownViewSlug(slug) {
   return FOLDER_ROUTES.some(([slugName]) => slugName === slug) || Boolean(QUICK_ROUTE_FILTERS[slug]);
 }
 const CHARACTER_CATEGORIES = ["正脸", "场景照", "动作", "服装", "其他"];
+
+// 服装库 / 发型库 / 通用片段走同一套素材网格，只换文案、图标和空状态
+const SPECIAL_LIBRARY_COPY = {
+  服装库: {
+    icon: Shirt,
+    subtitle: "沉淀可复用的服装参考，按颜色、品类和细节检索。",
+    emptyTitle: "还没有服装参考",
+    emptyHint: "上传穿搭图，按颜色和品类沉淀。",
+    emptyAction: "上传到服装库",
+  },
+  发型库: {
+    icon: Scissors,
+    subtitle: "跨角色复用的发型参考，按发色和款式检索。",
+    emptyTitle: "还没有发型参考",
+    emptyHint: "可以从角色设定迁出，也可以直接上传发型图。",
+    emptyAction: "上传到发型库",
+  },
+  通用片段: {
+    icon: Clapperboard,
+    subtitle: "可直接用于后续剪辑的视频片段，按发型与服装组合检索。",
+    emptyTitle: "还没有通用片段",
+    emptyHint: "上传已经剪好、可复用的前段和换装片段。",
+    emptyAction: "上传到通用片段",
+  },
+};
 const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
 const PROMPT_PLATFORMS = ["可灵", "即梦", "Runway", "剪映", "CapCut", "Sora", "Veo", "其他"];
 const PROMPT_TASK_TYPES = ["视频换脸 / 发型替换", "图生视频", "文生视频", "人物动作", "运镜", "变装", "转场", "口播", "其他"];
@@ -703,6 +742,10 @@ function Workspace({ user, onLogout }) {
       const view = viewFromPath(window.location.pathname);
       setActiveFolder(view.folder);
       setActiveFilter(view.filter || "全部");
+      if (view.folder !== "角色设定") {
+        setActiveCharacter("");
+        setActiveCharacterCategory("");
+      }
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -725,6 +768,21 @@ function Workspace({ user, onLogout }) {
         label: "角色设定",
         count: assets.filter((item) => item.folder === "角色设定").length,
         icon: FileImage,
+      },
+      {
+        label: "服装库",
+        count: assets.filter((item) => item.folder === "服装库").length,
+        icon: Shirt,
+      },
+      {
+        label: "发型库",
+        count: assets.filter((item) => item.folder === "发型库").length,
+        icon: Scissors,
+      },
+      {
+        label: "通用片段",
+        count: assets.filter((item) => item.folder === "通用片段").length,
+        icon: Clapperboard,
       },
       {
         label: "项目资料",
@@ -1238,12 +1296,15 @@ function Workspace({ user, onLogout }) {
     { label: "精选提示词", value: featuredPromptCount, hint: featuredPromptCount ? "效果稳定" : "尚未标记", icon: Heart, tone: "yellow" },
     { label: "关联作品", value: promptOutputCount, hint: promptOutputCount ? "已有生成结果" : "等待关联", icon: Play, tone: "blue" },
   ];
-  const libraryTitle = activeCharacter ? `角色设定 / ${activeCharacter}` : activeFolder;
+  const libraryTitle = activeFolder === "角色设定" && activeCharacter ? `角色设定 / ${activeCharacter}` : activeFolder;
   const isRoleAlbumView = activeFolder === "角色设定" && !activeCharacter;
   const isPromptView = activeFolder === "提示词库";
   const isVideoAccountView = activeFolder === "视频账号";
   const isMusicView = activeFolder === "音乐库";
   const isArchiveView = activeFolder === "工作文档";
+  const specialLibrary = SPECIAL_LIBRARY_COPY[activeFolder] || null;
+  const isSpecialLibraryView = Boolean(specialLibrary);
+  const SpecialLibraryIcon = specialLibrary?.icon;
   const displayStats = isPromptView ? promptStats : stats;
   const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
     ? activeFolder
@@ -1538,12 +1599,12 @@ function Workspace({ user, onLogout }) {
                     {!isRoleAlbumView && !isVideoAccountView && !isPromptView && !isArchiveView && total}
                   </span>
                 </h2>
-                {activeCharacter && (
+                {activeFolder === "角色设定" && activeCharacter && (
                   <button className="album-back-button" onClick={() => { setActiveCharacter(""); setActiveCharacterCategory(""); }}>
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isSpecialLibraryView ? specialLibrary.subtitle : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1797,12 +1858,21 @@ function Workspace({ user, onLogout }) {
                   />
                 ))}
               </div>
-            ) : activeCharacter ? (
+            ) : activeFolder === "角色设定" && activeCharacter ? (
               <div className="empty-state">
                 <div className="empty-icon"><FileImage size={22} /></div>
                 <h3>这个人物相册还没有素材</h3>
                 <p>上传第一张正脸或场景照，开始整理这个人物。</p>
                 <button className="primary-button" onClick={() => setShowUpload(true)}><Upload size={16} />上传人物素材</button>
+              </div>
+            ) : isSpecialLibraryView && !query.trim() && activeFilter === "全部" && !activeTag ? (
+              <div className="empty-state">
+                <div className="empty-icon"><SpecialLibraryIcon size={22} /></div>
+                <h3>{specialLibrary.emptyTitle}</h3>
+                <p>{specialLibrary.emptyHint}</p>
+                <button className="primary-button" onClick={() => setShowUpload(true)}>
+                  <Upload size={16} />{specialLibrary.emptyAction}
+                </button>
               </div>
             ) : (
               <EmptyState
@@ -3214,10 +3284,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
           <label>
             所在文件夹
             <select value={folder} onChange={(event) => setFolder(event.target.value)}>
-              <option>灵感收集</option>
-              <option>我的创作</option>
-              <option>角色设定</option>
-              <option>项目资料</option>
+              {LIBRARY_FOLDERS.map((item) => <option key={item}>{item}</option>)}
             </select>
           </label>
           <label>
@@ -3584,10 +3651,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
                 value={folder}
                 onChange={(event) => setFolder(event.target.value)}
               >
-                <option>灵感收集</option>
-                <option>我的创作</option>
-                <option>角色设定</option>
-                <option>项目资料</option>
+                {LIBRARY_FOLDERS.map((item) => <option key={item}>{item}</option>)}
               </select>
             </label>
             <button

@@ -18,7 +18,7 @@ import http.client
 
 DEFAULT_API = "https://aigc.chatcanvas.online"
 DEFAULT_COOKIE_FILE = Path.home() / ".codex" / "aigc-shelf-session.json"
-FOLDERS = ("灵感收集", "我的创作", "角色设定", "项目资料")
+FOLDERS = ("灵感收集", "我的创作", "角色设定", "项目资料", "服装库", "发型库", "通用片段")
 TAB_ALIASES = {
     "灵感收集整理": "灵感收集",
     "我的创作整理": "我的创作",
@@ -26,6 +26,12 @@ TAB_ALIASES = {
     "角色整理": "角色设定",
     "角色设定整理": "角色设定",
     "项目资料整理": "项目资料",
+    "服装库整理": "服装库",
+    "服装整理": "服装库",
+    "发型库整理": "发型库",
+    "发型整理": "发型库",
+    "通用片段整理": "通用片段",
+    "片段整理": "通用片段",
 }
 MUSIC_FIELDS = ("musicTitle", "musicArtist", "musicSource", "musicStatus", "musicConfidence", "musicEvidence")
 ASSET_FIELDS = (

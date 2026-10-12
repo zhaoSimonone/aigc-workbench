@@ -17,6 +17,15 @@ import uuid
 DEFAULT_API = "https://aigc.chatcanvas.online"
 DEFAULT_COOKIE_FILE = Path.home() / ".codex" / "aigc-shelf-session.json"
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+ALLOWED_FOLDERS = [
+    "灵感收集",
+    "我的创作",
+    "角色设定",
+    "项目资料",
+    "服装库",
+    "发型库",
+    "通用片段",
+]
 
 
 class MultipartBody:
@@ -221,7 +230,8 @@ def parse_args():
     parser.add_argument("--source", default="本地导入")
     parser.add_argument("--source-url", default="")
     parser.add_argument("--tags", default="待整理", help="以空格或逗号分隔")
-    parser.add_argument("--folder", default="灵感收集", choices=["灵感收集", "我的创作", "角色设定", "项目资料"])
+    parser.add_argument("--folder", default="灵感收集", choices=ALLOWED_FOLDERS, help="整批默认文件夹，可被 --manifest 逐文件覆盖")
+    parser.add_argument("--manifest", default="", help="逐文件元数据 JSON：{items:[{path,folder,name,tags}]}，路径必须是绝对路径")
     parser.add_argument("--used", action="store_true")
     parser.add_argument("--character-name", default="")
     parser.add_argument("--character-category", default="")
@@ -229,6 +239,76 @@ def parse_args():
     parser.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", DEFAULT_API))
     parser.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", str(DEFAULT_COOKIE_FILE)))
     return parser.parse_args()
+
+
+def split_tags(text):
+    """标签按空格、逗号或中文逗号分隔。"""
+    return [item for item in str(text).replace(",", " ").replace("，", " ").split() if item]
+
+
+def load_manifest(manifest_path, files):
+    """读取逐文件 manifest。
+
+    返回 (plan, errors)：plan 是 {绝对路径: 元数据}，errors 是 {绝对路径: 原因}。
+    非法的 manifest 条目只会跳过该条，不会让文件静默回落到 --folder。
+    """
+    path = Path(manifest_path).expanduser()
+    if not path.is_file():
+        raise SystemExit(f"manifest 文件不存在：{path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"manifest 不是合法 JSON：{path}（{error}）")
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise SystemExit("manifest 需要是 JSON 对象含 items 数组，或直接是数组")
+    canonical_files = {os.path.abspath(os.path.expanduser(str(item))) for item in files}
+    plan = {}
+    errors = {}
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            print(f"忽略：manifest 第 {index} 项不是对象", file=sys.stderr)
+            continue
+        raw_path = str(item.get("path", "")).strip()
+        if not raw_path:
+            print(f"忽略：manifest 第 {index} 项缺少 path", file=sys.stderr)
+            continue
+        if not os.path.isabs(raw_path):
+            print(f"忽略：manifest 第 {index} 项 path 必须是绝对路径：{raw_path}", file=sys.stderr)
+            continue
+        key = os.path.abspath(os.path.expanduser(os.path.normpath(raw_path)))
+        if key not in canonical_files:
+            print(f"忽略：manifest 第 {index} 项 path 不在本次待上传文件列表：{key}", file=sys.stderr)
+            continue
+        entry = {}
+        if item.get("folder") is not None:
+            folder = str(item["folder"]).strip()
+            if folder not in ALLOWED_FOLDERS:
+                errors[key] = f"manifest 指定的 folder 非法：{folder}（可选：{'、'.join(ALLOWED_FOLDERS)}）"
+                print(f"失败：{key}：{errors[key]}", file=sys.stderr)
+                continue
+            entry["folder"] = folder
+        tags = item.get("tags")
+        if isinstance(tags, str):
+            tags = split_tags(tags)
+        elif isinstance(tags, list):
+            tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+        elif tags is None:
+            tags = None
+        else:
+            errors[key] = "manifest 的 tags 必须是数组或空格分隔的字符串"
+            print(f"失败：{key}：{errors[key]}", file=sys.stderr)
+            continue
+        if tags is not None:
+            entry["tags"] = tags
+        for key_name in ("name", "source", "sourceUrl", "characterName", "characterCategory"):
+            value = str(item.get(key_name, "") or "").strip()
+            if value:
+                entry[key_name] = value
+        if key in plan:
+            print(f"提示：manifest 中 {key} 出现多次，以最后一条为准", file=sys.stderr)
+        plan[key] = entry
+    return plan, errors
 
 
 def load_name_map(map_path):
@@ -283,10 +363,11 @@ def main():
         canonical_files = {os.path.abspath(os.path.expanduser(str(p))) for p in files}
         for path_text in sorted(set(name_map) - canonical_files):
             print(f"提示：名称映射中的路径不在待上传列表：{path_text}", file=sys.stderr)
+    manifest_plan, manifest_errors = load_manifest(args.manifest, files) if args.manifest else ({}, {})
     client = Client(args.api, args.cookie_file)
     user = client.ensure_login()
     print(f"已登录：{user.get('name') or user.get('email') or '当前账号'}")
-    tags = [item for item in args.tags.replace(",", " ").replace("，", " ").split() if item]
+    tags = split_tags(args.tags)
     failures = 0
     file_hashes = {}
     hash_failures = {}
@@ -302,6 +383,12 @@ def main():
         return 1
     seen_hashes = {}
     for index, file_path in enumerate(files, 1):
+        # manifest 的键是绝对路径字符串，file_path 是 Path，必须先转成同样的键再查表
+        manifest_key = os.path.abspath(os.path.expanduser(str(file_path)))
+        if manifest_key in manifest_errors:
+            failures += 1
+            print(f"[{index}/{len(files)}] 失败：{file_path.name}：{manifest_errors[manifest_key]}", file=sys.stderr)
+            continue
         if file_path in hash_failures:
             failures += 1
             print(f"[{index}/{len(files)}] 失败：{file_path.name}：无法计算文件哈希：{hash_failures[file_path]}", file=sys.stderr)
@@ -314,18 +401,21 @@ def main():
             origin = "已存在素材" if digest in existing_assets else "本批次已上传"
             print(f"[{index}/{len(files)}] 跳过：{file_path.name} -> {origin}「{duplicate_name}」({duplicate_id})")
             continue
+        # 逐文件元数据优先级：manifest > --name-map > --name/--tags/--folder
+        entry = manifest_plan.get(manifest_key, {})
         # 服务端在 name 为空时回退用 multipart 文件名，而 multer 按 latin1 解码
         # 文件名 header，中文文件名会变乱码；显式传表单字段 name 避免。
-        name = resolve_title(file_path, name_map, args.name, len(files))
+        name = entry.get("name") or resolve_title(file_path, name_map, args.name, len(files))
+        file_tags = entry.get("tags") or tags or ["待整理"]
         metadata = {
             "name": name,
-            "source": args.source,
-            "sourceUrl": args.source_url,
-            "tags": tags or ["待整理"],
+            "source": entry.get("source") or args.source,
+            "sourceUrl": entry.get("sourceUrl") or args.source_url,
+            "tags": file_tags,
             "used": args.used,
-            "folder": args.folder,
-            "characterName": args.character_name,
-            "characterCategory": args.character_category,
+            "folder": entry.get("folder") or args.folder,
+            "characterName": entry.get("characterName") or args.character_name,
+            "characterCategory": entry.get("characterCategory") or args.character_category,
             "parentAssetIds": args.parent_asset_ids,
         }
         try:

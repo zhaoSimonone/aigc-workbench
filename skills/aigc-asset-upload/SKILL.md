@@ -1,54 +1,115 @@
 ---
 name: aigc-asset-upload
-description: Upload user-selected local videos and images to the AIGC Shelf asset library, including metadata, when the user explicitly asks to import or batch-upload creative assets.
+description: Upload user-selected local videos and images to the AIGC Shelf asset library with content-based routing, naming and tagging. Use when the user asks to import or batch-upload creative assets, or to put files into a specific library — 服装库（服装/穿搭参考）、发型库（发型/头饰参考）、通用片段（可复用剪辑片段）、角色设定（人物正脸/场景/动作）、项目资料、灵感收集或我的创作. Triggers include 上传这些素材、传进服装库、这些是发型、上传通用片段、把图传到素材库.
 ---
 
 # AIGC 素材上传
 
-将用户明确指定的本地视频或图片上传到 AIGC Shelf。AIGC Shelf 服务端会把文件写入腾讯云 COS，并把素材元数据写入按用户隔离的数据库；本 Skill 不读取、复制或要求用户提供 COS SecretId/SecretKey。
+将用户明确指定的本地视频或图片上传到 AIGC Shelf。上传前先判断每个文件该进哪个库，再按画面特征生成标题和标签。AIGC Shelf 服务端会把文件写入腾讯云 COS，并把素材元数据写入按用户隔离的数据库；本 Skill 不读取、复制或要求用户提供 COS SecretId/SecretKey。
+
+## 素材库
+
+| 库 | 放什么 | 典型检索 |
+| --- | --- | --- |
+| `服装库` | 可复用的服装参考图，偶尔视频 | 颜色、品类、领口/衣长/面料 |
+| `发型库` | 发型/头饰参考图 | 发色、款式、长度、发饰 |
+| `通用片段` | 可直接剪进成片的视频片段 | 发型+服装组合、换装、前段 |
+| `角色设定` | 某个人物的正脸、场景照、动作、该角色的着装照 | 人物、分类 |
+| `我的创作` / `灵感收集` / `项目资料` | 成片、泛参考、工作文件 | — |
+
+「服装库」是可复用的衣服参考；「角色设定」里的服装照是「这个角色穿着某套衣服」。两者不要互相搬运。
 
 ## 工作流程
 
-1. 只处理用户明确指定的文件。若消息包含附件路径，使用这些路径；若用户给出目录，先列出其中的视频/图片并确认范围，不上传无关文件。
-2. 从用户请求中提取元数据。默认值为：所在文件夹 `灵感收集`、来源 `本地导入`、标签 `待整理`、未使用。用户已经明确给出的名称、来源、原链接、标签、人物相册、人物分类、使用状态和关联素材 ID 要传入；只有会改变归类结果的必要信息缺失时才提问。
-3. 生成素材标题。文件名已是中文且语义清楚时沿用文件名；文件名是 UUID、英文等非中文命名时，先逐张目检图片，按画面特征（妆造、发型、服装、场景、姿态等）拟 8–14 字中文标题，不虚构画面中没有的元素，把标题写入 `--name-map` 映射文件（每行 `路径|标题`）批量传入。用户已指定 `--name` 或明确要求沿用原名时以用户为准。
-4. 当目标文件夹为 `角色设定` 时，需要人物相册名称；人物分类只有用户明确要求或业务流程要求时再询问。多个文件使用同一批元数据，名称由脚本自动追加文件名以避免重名。
-5. 执行 `scripts/upload_assets.py`。脚本会先检查本机保存的 AIGC Shelf 会话；会话失效时使用 `AIGC_SHELF_EMAIL`/`AIGC_SHELF_PASSWORD` 环境变量或安全提示输入登录信息。不要把密码写入命令行、Skill 文件或仓库。
-6. 脚本会在上传前对每个文件计算 SHA-256，并按当前登录账号批量查询已存在素材；内容重复的文件会跳过上传，并报告已存在素材名称和数据库 ID。同一批次内内容相同的文件也只上传一次。去重检查失败时脚本会停止上传，避免误产生重复素材。
-7. 等脚本输出每个文件的成功、跳过或失败结果后再向用户汇报。成功项必须包含素材名称和数据库 ID；跳过项必须说明对应的已存在素材；失败项说明文件名和服务端错误，不把失败说成已上传。
+1. **只处理用户明确指定的文件。** 消息带附件路径就用这些路径；用户给目录时先列出其中的视频/图片并确认范围，不上传无关文件。
+
+2. **逐文件判定目标库。** 优先级从高到低，命中即停：
+
+   1. 用户明确指定：「传到服装库」「这些是发型」。
+   2. 父目录名提示：父目录名为 `服装` → `服装库`；父目录名为 `通用片段` → `通用片段`；父目录名含 `发型` → `发型库`。
+   3. 文件名模式：视频名形如 `发型-服装`，或含 `通用片段`/`换装` 且可复用 → `通用片段`。
+   4. 看内容：
+      - 主体是发型、头饰、假发片、发型对比图 → `发型库`
+      - 主体是服装穿搭、全身/半身服装参考、微信保存的衣服图 → `服装库`
+      - 可循环使用的人物表演、换装、前段视频，重点是发型+服装组合而不是剧情 → `通用片段`
+      - 正脸、身份锁定、人物设定图 → `角色设定`（缺人物名时才提问）
+      - 其他创作参考 → `灵感收集`
+   5. **用户已指定人物相册且内容是正脸/场景/动作时，即使画面里有头发或衣服，也进 `角色设定`**，不要误路由到发型库或服装库。
+
+   同一批次可以进不同文件夹。混合素材不要用「整批一个 `--folder` + 整批同一组标签」。
+
+3. **逐文件命名和标签。** 只写画面里看得到的事实，禁止编造品牌、角色身份、购买链接或「很适合剪辑」这类空话。
+
+   - **服装库**：标题 `颜色 + 关键剪裁/面料 + 品类`，8–16 字，不用 `·`，不用文件名。
+     例：`淡紫针织露肩鱼尾长裙`（标签：淡紫, 针织, 露肩, 长袖, 鱼尾）、`灰色高领露背针织短裙`、`果绿挂脖抹胸长裙`。
+   - **发型库**：标题 `发色（可省略默认色）+ 款式 + 关键发饰`。
+     例：`蓝色双麻花辫`、`蓝色高丸子头`、`花冠编发`、`齐刘海长卷发`。标签从发色、款式、长度、发饰里选 3–5 个。
+   - **通用片段**：文件名已是语义清楚的中文时**沿用文件名去掉扩展名**，不重拟标题；标签从文件名拆开，并加用途标签 `通用片段`，含「换装」加 `换装`，含「前段」加 `前段`，含「无文字」加 `无文字`。
+     例：`蓝色高丸子头-淡紫针织挂脖长裙` → `蓝色高丸子头, 淡紫挂脖长裙, 通用片段`。
+   - 每个素材 3–5 个标签，上限 5。
+
+4. **看图规则。** `WechatIMG*`、UUID、英文乱码一律视为无语义，必须打开图片看画面再命名。视频至少看封面；通用片段在文件名无语义时再截 3 个均匀时间点。
+
+5. **先把计划给用户看。** 用简表列出「文件 → 目标库 → 新标题 → 标签」。用户已明确说「把服装目录传进服装库」且文件都在该目录时，可以不再逐张确认，但上传后仍要汇报实际标题。
+
+6. **写临时 manifest，调用脚本。** manifest 允许同一批次里不同文件进不同库、拿不同标题和标签：
+
+   ```json
+   {
+     "items": [
+       {
+         "path": "/Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg",
+         "folder": "服装库",
+         "name": "淡紫针织露肩鱼尾裙",
+         "tags": ["淡紫", "针织", "露肩", "长裙", "鱼尾"]
+       },
+       {
+         "path": "/Users/simon/Desktop/AIGC/通用片段/蓝色高丸子头-淡紫针织挂脖长裙.mp4",
+         "folder": "通用片段",
+         "name": "蓝色高丸子头-淡紫针织挂脖长裙",
+         "tags": ["蓝色高丸子头", "淡紫挂脖长裙", "通用片段"]
+       }
+     ]
+   }
+   ```
+
+   规则：`path` 必须是绝对路径且出现在本次上传文件列表中；`folder` 必须是上表允许的文件夹之一；`name`、`tags` 缺省时回退到 CLI 的 `--name` / `--tags`。旧写法 `--name-map`（每行 `路径|标题`）仍然可用，但混合素材一律走 manifest。非法 folder、path 不在文件列表等问题会明确报错并跳过，不会静默改传到灵感收集。
+
+7. **脚本行为。** 脚本先检查本机会话；会话失效时用 `AIGC_SHELF_EMAIL`/`AIGC_SHELF_PASSWORD` 环境变量或安全提示输入，不要把密码写进命令行、Skill 文件或仓库。上传前对每个文件计算 SHA-256 并批量查询已存在素材，重复内容跳过并报告已存在素材的名称和 ID；同批次内相同内容只上传一次；去重检查失败时停止上传。
+
+8. **汇报。** 等脚本输出每个文件的结果再汇报。成功项必须带素材名称和数据库 ID；跳过项必须说明对应的已存在素材；失败项说明文件名和服务端错误，不把失败说成已上传。
 
 ## 调用
 
-脚本默认使用生产地址 `https://aigc.chatcanvas.online`，也可通过 `AIGC_SHELF_URL` 或 `--api` 覆盖。示例：
+脚本默认使用生产地址 `https://aigc.chatcanvas.online`，可用 `AIGC_SHELF_URL` 或 `--api` 覆盖。
+
+整批同库时直接用 `--folder`：
 
 ```bash
-python3 /Users/simon/.codex/skills/aigc-asset-upload/scripts/upload_assets.py \
-  /path/to/video.mp4 /path/to/reference.png \
-  --name "林小栀角色参考" \
-  --source "本地导入" \
-  --tags "人物,正脸,参考" \
-  --folder "角色设定" \
-  --character-name "林小栀" \
-  --character-category "正脸"
+# 服装目录 → 服装库
+python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
+  /Users/simon/Desktop/AIGC/服装/*.jpg \
+  --folder "服装库" --source "本地导入"
 ```
 
-不需要指定名称时省略 `--name`，服务端使用原文件名。`--source-url` 保存原视频/参考链接；`--used` 标记已使用；可重复传入 `--parent-asset-id` 关联原素材。
-
-批量整理、且文件名是非中文命名（UUID、英文等）需要按画面特征命名时，先目检每张图片生成映射文件，再一次性批量上传（映射只提供标题，文件仍按位置参数传入）：
+混合文件时只用 manifest，不要整批一个 folder：
 
 ```bash
-cat > /tmp/aigc-name-map.txt <<'EOF'
-/Users/simon/Desktop/AIGC/1004视频/素材/第一批/7cc01f54-fc86-4662-a0c0-e54fa6da72f3.png|蓝发白牛角头饰粉衫黑鱼尾裙
-/Users/simon/Desktop/AIGC/1004视频/照片/Character Swap.png|蓝发红羽绒服围巾节日站姿
+cat > /tmp/aigc-manifest.json <<'EOF'
+{"items":[
+  {"path":"/Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg","folder":"服装库","name":"淡紫针织露肩鱼尾裙","tags":["淡紫","针织","露肩","长裙","鱼尾"]},
+  {"path":"/Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4","folder":"通用片段","name":"蓝色双麻花辫-黑色吊带裙","tags":["蓝色双麻花辫","黑色吊带裙","通用片段"]}
+]}
 EOF
-cut -d'|' -f1 /tmp/aigc-name-map.txt | tr '\n' '\0' | \
-  xargs -0 python3 /Users/simon/.codex/skills/aigc-asset-upload/scripts/upload_assets.py \
-  --name-map /tmp/aigc-name-map.txt \
-  --source "本地导入" \
-  --tags "蕾姆,妆造图" \
-  --folder "角色设定" \
-  --character-name "蕾姆"
+python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
+  /Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg \
+  /Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4 \
+  --manifest /tmp/aigc-manifest.json
 ```
+
+`--folder` 可选值：`灵感收集`、`我的创作`、`角色设定`、`项目资料`、`服装库`、`发型库`、`通用片段`。
+
+其它参数：`--source-url` 保存原视频/参考链接；`--used` 标记已使用；可重复传入 `--parent-asset-id` 关联原素材；目标为 `角色设定` 时用 `--character-name`（必需）和 `--character-category` 指定人物相册与分类。
 
 ## 安全与边界
 
@@ -56,3 +117,4 @@ cut -d'|' -f1 /tmp/aigc-name-map.txt | tr '\n' '\0' | \
 - 不读取 `/Users/simon/Desktop/dev/cloud/tencent` 下的凭据文件，不在日志、参数、提交或回复中输出 COS 密钥、密码或完整会话 Cookie。
 - 会话文件默认保存到 `~/.codex/aigc-shelf-session.json`，脚本设置为仅当前用户可读；发现权限异常时提醒用户，不复制到仓库。
 - 默认单文件限制 2 GB，服务端负责生成视频封面、识别时长和写入数据库。
+- 不新建数据库表，不修改素材类型字段，不删除角色设定里的正脸、场景照和动作照。
