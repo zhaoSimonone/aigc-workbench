@@ -6,7 +6,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { pipeline } = require('stream/promises');
-const { PassThrough, Transform } = require('stream');
+const { Transform } = require('stream');
 const express = require('express');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
@@ -16,26 +16,21 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || path.resolve(process.cwd(), '.env') });
 const {
-  KINDS: ARCHIVE_KINDS,
-  classifyKind,
-  isTextPreviewKind,
-  loadArchiveConfig,
-  matchesIncludedPath,
-  mimeTypeFor,
-  normaliseExtension,
-  resolveSourcePath,
-  scanDirectory,
-} = require('./archive-paths');
-const { createArchiveStorage, isSameDevice } = require('./archive-storage');
-const { createArchiveQueue } = require('./archive-jobs');
-const {
   applyCatalog,
   assertNetdiskPath,
   loadNetdiskConfig,
-  normaliseNodePath,
   publicNode,
   readWhitelistedCatalog,
 } = require('./netdisk-catalog');
+const {
+  AUTHORIZE_URL,
+  CREDENTIAL_PURPOSE,
+  LiveError,
+  createCredentialStore,
+  createListClient,
+  createLiveDirectoryReader,
+  readEncryptionKey,
+} = require('./netdisk-live');
 
 const app = express();
 const port = Number(process.env.PORT || 18080);
@@ -2003,612 +1998,44 @@ app.get('/api/music-tracks/:id/stream', requireUser, async (req, res, next) => {
   }
 });
 
-// ============================ 本地目录归档 / 工作文档 ============================
-const archiveConfig = loadArchiveConfig();
-const archiveSliceCacheDir = process.env.ARCHIVE_COS_SLICE_CACHE_DIR || path.join(uploadDir, 'cos-slice-cache');
-const archiveStorages = new Map();
-
-function archiveStorage(backend) {
-  if (!archiveStorages.has(backend)) {
-    const backendConfig = { ...archiveConfig, storageBackend: backend };
-    archiveStorages.set(backend, createArchiveStorage({ config: backendConfig, bucket, region, sliceCacheDir: archiveSliceCacheDir }));
-  }
-  return archiveStorages.get(backend);
-}
-
-function archiveBackendError(message) {
-  return Object.assign(new Error(message), { statusCode: 409, code: 'ARCHIVE_BACKEND_UNAVAILABLE' });
-}
-
-async function archiveBackendInfo() {
-  const backends = [
-    { id: 'cos', label: '腾讯云 COS', available: Boolean(bucket && region && process.env.TENCENT_COS_SECRET_ID && process.env.TENCENT_COS_SECRET_KEY), hint: '备份完成后删除本地文件可释放磁盘空间' },
-    { id: 'local', label: '本地归档目录', available: Boolean(archiveConfig.localRoot), hint: archiveConfig.localRoot ? `目标目录 ${archiveConfig.localRoot}` : '未配置 ARCHIVE_LOCAL_ROOT' },
-  ];
-  return {
-    storageBackendDefault: archiveConfig.storageBackend,
-    backends,
-    allowedRoots: archiveConfig.allowedRoots,
-    maxConcurrency: archiveConfig.maxConcurrency,
-    maxRetries: archiveConfig.maxRetries,
-    textPreviewMaxBytes: archiveConfig.textPreviewMaxBytes,
-    kinds: ARCHIVE_KINDS,
-    sameDeviceAsSource: archiveConfig.localRoot ? await isSameDevice(archiveConfig.localRoot, archiveConfig.allowedRoots[0] || archiveConfig.localRoot) : false,
-  };
-}
-
-// 归档缩略图写到服务端临时目录，绝不在源目录里生成或删除任何文件。
-async function createArchivePreview(type, sourcePath, objectKey) {
-  const previewPath = path.join(uploadDir, `archive-preview-${crypto.randomUUID()}.jpg`);
-  let durationSeconds = null;
-  try {
-    if (type === 'video') {
-      durationSeconds = await readVideoDuration(sourcePath);
-      const seek = durationSeconds && durationSeconds > 0.2 ? await pickPreviewTime(sourcePath, durationSeconds) : 0;
-      await execFileAsync(ffmpegPath, ['-y', '-ss', String(seek), '-i', sourcePath, '-frames:v', '1', '-vf', 'scale=min\\(480\\,iw\\):-2', '-q:v', '4', previewPath], { timeout: 120000 });
-    } else {
-      await execFileAsync(ffmpegPath, ['-y', '-i', sourcePath, '-vf', 'scale=min\\(480\\,iw\\):-2', '-frames:v', '1', '-q:v', '4', previewPath], { timeout: 60000 });
-    }
-    const thumbKey = `${objectKey}.jpg`;
-    await putObject(thumbKey, previewPath, 'image/jpeg', mediaCacheControl);
-    return { thumbKey, durationSeconds };
-  } catch (error) {
-    console.warn('archive preview generation skipped:', error.message);
-    return { thumbKey: null, durationSeconds: null };
-  } finally {
-    await fsp.unlink(previewPath).catch(() => {});
-  }
-}
-
-// 归档产生的图片/视频沿用现有素材表：复用同一套 COS 预览、缩略图、视频 Range 流和下载能力。
-async function createArchiveMediaAsset({ userId, file, objectKey, sha256, mimeType, sizeBytes, folder }) {
-  const sourcePath = file.source_path;
-  const type = file.kind === 'video' ? 'video' : 'image';
-  if (!['image', 'video'].includes(type)) return null;
-  const preview = await createArchivePreview(type, sourcePath, objectKey);
-  const name = safeName(file.name) || safeName(path.basename(file.relative_path));
-  const { rows } = await pool.query(
-    `INSERT INTO assets(user_id,name,type,source,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,note,archive_file_id)
-     VALUES($1,$2,$3,'本地目录归档',$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-    [
-      userId,
-      name,
-      type,
-      objectKey,
-      preview.thumbKey,
-      mimeType,
-      Number(sizeBytes),
-      sha256,
-      preview.durationSeconds,
-      (folder || '灵感收集').slice(0, 80),
-      `来自本地目录归档：${file.relative_path}`,
-      file.id,
-    ],
-  );
-  const tagRow = await pool.query("INSERT INTO tags(user_id,name) VALUES($1,'本地归档') ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id", [userId]);
-  await pool.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [rows[0].id, tagRow.rows[0].id]);
-  return rows[0].id;
-}
-
-const archiveQueue = createArchiveQueue({
-  pool,
-  config: archiveConfig,
-  getStorage: (backend) => archiveStorage(backend),
-  createMediaAsset: createArchiveMediaAsset,
-});
-
-function handleArchiveError(res, next, error) {
-  if (error && error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-  if (error && error.archiveCode) return res.status(409).json({ error: error.message });
-  return next(error);
-}
-
-function publicArchiveBatch(row, extra = {}) {
-  return {
-    id: row.id,
-    name: row.name,
-    sourceRoot: row.source_root,
-    sourceRelativeRoot: row.source_relative_root,
-    storageBackend: row.storage_backend,
-    status: row.status,
-    createMediaAssets: row.create_media_assets,
-    assetFolder: row.asset_folder || '',
-    totalFiles: Number(row.total_files || 0),
-    totalBytes: Number(row.total_bytes || 0),
-    processedFiles: Number(row.processed_files || 0),
-    processedBytes: Number(row.processed_bytes || 0),
-    successFiles: Number(row.success_files || 0),
-    failedFiles: Number(row.failed_files || 0),
-    skippedFiles: Number(row.skipped_files || 0),
-    currentRelativePath: row.current_relative_path || '',
-    sourceCleanupStatus: row.source_cleanup_status,
-    sourceCleanupRequestedAt: row.source_cleanup_requested_at,
-    sourceCleanupCompletedAt: row.source_cleanup_completed_at,
-    lastError: row.last_error || '',
-    createdAt: row.created_at,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    updatedAt: row.updated_at,
-    ...extra,
-  };
-}
-
-function publicArchiveFile(row, extra = {}) {
-  return {
-    id: row.id,
-    batchId: row.batch_id,
-    batchName: row.batch_name || '',
-    objectId: row.object_id,
-    assetId: row.asset_id,
-    name: row.name,
-    relativePath: row.relative_path,
-    sourcePath: row.source_path,
-    extension: row.extension,
-    kind: row.kind,
-    mimeType: row.mime_type,
-    sizeBytes: Number(row.size_bytes || 0),
-    size: formatBytes(Number(row.size_bytes || 0)),
-    sourceMtime: row.source_mtime,
-    sha256: row.sha256 || '',
-    objectKey: row.object_key || '',
-    objectStatus: row.object_status || '',
-    verifiedAt: row.verified_at || null,
-    status: row.status,
-    retryCount: Number(row.retry_count || 0),
-    errorCode: row.error_code || '',
-    errorMessage: row.error_message || '',
-    sourceDeletedAt: row.source_deleted_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    ...extra,
-  };
-}
-
-async function ownedArchiveBatch(batchId, userId) {
-  const { rows } = await pool.query('SELECT * FROM archive_batches WHERE id=$1 AND user_id=$2', [batchId, userId]);
-  if (!rows[0]) throw Object.assign(new Error('归档批次不存在'), { statusCode: 404 });
-  return rows[0];
-}
-
-async function ownedArchiveFile(fileId, userId) {
-  const { rows } = await pool.query(
-    `SELECT f.*, o.object_key, o.status AS object_status, o.verified_at, o.content_type AS object_content_type
-       FROM archive_files f LEFT JOIN archive_objects o ON o.id=f.object_id
-      WHERE f.id=$1 AND f.user_id=$2`,
-    [fileId, userId],
-  );
-  if (!rows[0]) throw Object.assign(new Error('归档文件不存在'), { statusCode: 404 });
-  return rows[0];
-}
-
-function patternToRegExp(pattern) {
-  const escaped = String(pattern).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp(escaped, 'i');
-}
-
-function matchesExcludePattern(relativePath, name, patterns) {
-  return (Array.isArray(patterns) ? patterns : [])
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)
-    .some((pattern) => patternToRegExp(pattern).test(relativePath) || patternToRegExp(pattern).test(name));
-}
-
-function archiveContentDisposition(filename, inline) {
-  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `${inline ? 'inline' : 'attachment'}; filename="download"; filename*=UTF-8''${encoded}`;
-}
-
-function parseByteRange(rangeHeader, total) {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(String(rangeHeader || ''));
-  if (!match || (!match[1] && !match[2])) return null;
-  let start = 0;
-  let end = Math.max(0, total - 1);
-  if (match[1]) start = Number(match[1]);
-  if (match[2]) end = Number(match[2]);
-  else end = Math.min(total - 1, start + 4 * 1024 * 1024 - 1);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= total || end < start) return 'invalid';
-  return { start, end: Math.min(end, total - 1) };
-}
-
-async function readArchiveText(storage, key, maxBytes) {
-  const chunks = [];
-  let size = 0;
-  if (storage.backend === 'local') {
-    const stream = fs.createReadStream(storage.objectPath(key), { start: 0, end: Math.max(0, maxBytes - 1) });
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-      size += chunk.length;
-    }
-  } else {
-    const sink = new PassThrough({ highWaterMark: 256 * 1024 });
-    sink.on('data', (chunk) => {
-      chunks.push(chunk);
-      size += chunk.length;
-    });
-    const done = new Promise((resolve, reject) => {
-      sink.on('end', resolve);
-      sink.on('error', reject);
-    });
-    await storage.pipeTo(key, sink, { start: 0, end: maxBytes - 1 });
-    await done;
-  }
-  const buffer = Buffer.concat(chunks);
-  return { text: buffer.toString('utf8'), bytes: buffer.length };
-}
-
-app.get('/api/archive/options', requireUser, async (_req, res, next) => {
-  try {
-    res.json({ options: await archiveBackendInfo() });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// 只读扫描：不哈希、不上传、不删除源文件，只读 stat 和目录结构。
-app.post('/api/archive/scan', requireUser, async (req, res, next) => {
-  try {
-    const sourcePath = String(req.body?.sourcePath || '').trim();
-    if (!sourcePath) return res.status(400).json({ error: '请填写要扫描的本地目录路径' });
-    const scan = await scanDirectory({
-      sourcePath,
-      allowedRoots: archiveConfig.allowedRoots,
-      maxEntries: archiveConfig.scanEntryLimit,
-      includeSensitive: req.body?.includeSensitive === true,
-    });
-    res.json({ scan: { ...scan, options: await archiveBackendInfo() } });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-// 创建批次只保存清单并立即返回，实际上传由后台任务完成，不占用长时间 HTTP 请求。
-app.post('/api/archive/batches', requireUser, async (req, res, next) => {
-  let client;
-  try {
-    const sourcePath = String(req.body?.sourcePath || '').trim();
-    if (!sourcePath) return res.status(400).json({ error: '请填写要归档的本地目录路径' });
-    const storageBackend = String(req.body?.storageBackend || archiveConfig.storageBackend).trim();
-    if (!['cos', 'local'].includes(storageBackend)) return res.status(400).json({ error: '归档后端无效' });
-    if (storageBackend === 'cos' && !(bucket && region && process.env.TENCENT_COS_SECRET_ID && process.env.TENCENT_COS_SECRET_KEY)) {
-      throw archiveBackendError('COS 配置不完整，无法创建 COS 归档批次');
-    }
-    if (storageBackend === 'local' && !archiveConfig.localRoot) throw archiveBackendError('未配置 ARCHIVE_LOCAL_ROOT，无法创建 local 归档批次');
-
-    const includeRelativePaths = Array.isArray(req.body?.includeRelativePaths) ? req.body.includeRelativePaths : ['.'];
-    const excludePatterns = Array.isArray(req.body?.excludePatterns) ? req.body.excludePatterns.slice(0, 100) : [];
-    const includeSensitive = req.body?.includeSensitive === true;
-    const createMediaAssets = req.body?.createMediaAssets === true;
-    const assetFolder = String(req.body?.assetFolder || '灵感收集').trim().slice(0, 80) || '灵感收集';
-
-    const { realPath, relativePath: sourceRelativeRoot } = await resolveSourcePath(sourcePath, archiveConfig.allowedRoots);
-    if (storageBackend === 'local') {
-      const localRoot = path.resolve(archiveConfig.localRoot);
-      if (localRoot === realPath || realPath.startsWith(`${localRoot}${path.sep}`)) {
-        throw archiveBackendError('local 归档目录不能位于源目录内部');
-      }
-    }
-
-    const scan = await scanDirectory({
-      sourcePath: realPath,
-      allowedRoots: archiveConfig.allowedRoots,
-      maxEntries: archiveConfig.scanMaxEntries,
-      includeSensitive,
-    });
-    if (scan.entriesTruncated) return res.status(400).json({ error: `目录条目超过 ${archiveConfig.scanMaxEntries} 个，请缩小导入范围` });
-
-    const selected = scan.entries.filter((entry) => matchesIncludedPath(entry.relativePath, includeRelativePaths) && !matchesExcludePattern(entry.relativePath, entry.name, excludePatterns));
-    if (!selected.length) return res.status(400).json({ error: '所选范围内没有可归档的文件' });
-
-    const name = String(req.body?.name || scan.displayName).trim().slice(0, 120) || scan.displayName;
-    client = await pool.connect();
-    await client.query('BEGIN');
-    const { rows: batchRows } = await client.query(
-      `INSERT INTO archive_batches(user_id,name,source_root,source_relative_root,storage_backend,status,create_media_assets,asset_folder,total_files,total_bytes,skipped_files)
-       VALUES($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,$10) RETURNING *`,
-      [
-        req.user.id,
-        name,
-        realPath,
-        sourceRelativeRoot,
-        storageBackend,
-        createMediaAssets && storageBackend === 'cos',
-        assetFolder,
-        selected.length,
-        selected.reduce((sum, entry) => sum + entry.sizeBytes, 0),
-        scan.skippedCount,
-      ],
-    );
-    const batch = batchRows[0];
-    for (let index = 0; index < selected.length; index += 200) {
-      const chunk = selected.slice(index, index + 200);
-      const values = [];
-      const tuples = chunk.map((entry) => {
-        values.push(req.user.id, batch.id, path.join(realPath, entry.relativePath), entry.relativePath, entry.name, entry.extension || normaliseExtension(entry.name), entry.kind || classifyKind(entry.name), entry.mimeType || mimeTypeFor(entry.name), entry.sizeBytes, entry.sourceMtime);
-        const start = values.length - 9;
-        return `($${start},$${start + 1},$${start + 2},$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9})`;
-      });
-      await client.query(
-        `INSERT INTO archive_files(user_id,batch_id,source_path,relative_path,name,extension,kind,mime_type,size_bytes,source_mtime)
-         VALUES ${tuples.join(',')} ON CONFLICT(batch_id, relative_path) DO NOTHING`,
-        values,
-      );
-    }
-    await client.query('COMMIT');
-    client.release();
-    client = null;
-    res.status(201).json({ batch: publicArchiveBatch(batch) });
-  } catch (error) {
-    if (client) await client.query('ROLLBACK').catch(() => {});
-    if (client) client.release();
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.get('/api/archive/batches', requireUser, async (req, res, next) => {
-  try {
-    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
-    const { rows } = await pool.query(
-      'SELECT * FROM archive_batches WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2',
-      [req.user.id, limit],
-    );
-    res.json({ batches: rows.map((row) => publicArchiveBatch(row)) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get('/api/archive/batches/:id', requireUser, async (req, res, next) => {
-  try {
-    const batch = await ownedArchiveBatch(req.params.id, req.user.id);
-    const readiness = await archiveQueue.cleanupReadiness(batch);
-    const { rows: failures } = await pool.query(
-      `SELECT id, relative_path, error_code, error_message, retry_count, size_bytes
-         FROM archive_files WHERE batch_id=$1 AND status='failed' ORDER BY updated_at DESC LIMIT 20`,
-      [batch.id],
-    );
-    res.json({
-      batch: publicArchiveBatch(batch, {
-        cleanupReady: readiness.ready,
-        cleanupBlockers: readiness.blockers,
-        cleanupCandidates: readiness.stats.total,
-        failures: failures.map((row) => ({ id: row.id, relativePath: row.relative_path, errorCode: row.error_code, errorMessage: row.error_message, retryCount: Number(row.retry_count || 0), sizeBytes: Number(row.size_bytes || 0) })),
-      }),
-    });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-for (const [action, handler] of [
-  ['start', (batchId, userId) => archiveQueue.startBatch(batchId, userId)],
-  ['pause', (batchId, userId) => archiveQueue.pauseBatch(batchId, userId)],
-  ['resume', (batchId, userId) => archiveQueue.resumeBatch(batchId, userId)],
-  ['cancel', (batchId, userId) => archiveQueue.cancelBatch(batchId, userId)],
-]) {
-  app.post(`/api/archive/batches/:id/${action}`, requireUser, async (req, res, next) => {
-    try {
-      const batch = await handler(req.params.id, req.user.id);
-      res.json({ batch: publicArchiveBatch(batch) });
-    } catch (error) {
-      handleArchiveError(res, next, error);
-    }
-  });
-}
-
-app.post('/api/archive/batches/:id/retry-failed', requireUser, async (req, res, next) => {
-  try {
-    const result = await archiveQueue.retryFailedFiles(req.params.id, req.user.id);
-    res.json({ requeued: result.requeued, batch: publicArchiveBatch(result.batch) });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.post('/api/archive/batches/:id/verify', requireUser, async (req, res, next) => {
-  try {
-    const batch = await ownedArchiveBatch(req.params.id, req.user.id);
-    const verification = await archiveQueue.verifyBatch(batch.id, req.user.id);
-    res.json({ verification, batch: publicArchiveBatch(await ownedArchiveBatch(batch.id, req.user.id)) });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.get('/api/archive/batches/:id/manifest', requireUser, async (req, res, next) => {
-  try {
-    await ownedArchiveBatch(req.params.id, req.user.id);
-    res.json(await archiveQueue.manifest(req.params.id, req.user.id));
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.post('/api/archive/batches/:id/cleanup-source', requireUser, async (req, res, next) => {
-  try {
-    if (req.body?.batchId && String(req.body.batchId) !== String(req.params.id)) {
-      return res.status(400).json({ error: '请求体中的批次 ID 与路径不一致' });
-    }
-    const summary = await archiveQueue.cleanupSource({
-      batchId: req.params.id,
-      userId: req.user.id,
-      confirmText: String(req.body?.confirmText || ''),
-      onlySuccessful: req.body?.onlySuccessful !== false,
-      removeEmptyDirectories: req.body?.removeEmptyDirectories === true,
-      allowSameDisk: req.body?.allowSameDisk === true,
-    });
-    res.json({ cleanup: summary, batch: publicArchiveBatch(await ownedArchiveBatch(req.params.id, req.user.id)) });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.get('/api/archive/files', requireUser, async (req, res, next) => {
-  try {
-    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
-    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 50, 1), 200);
-    const conditions = ['f.user_id=$1'];
-    const values = [req.user.id];
-    const add = (sql, value) => {
-      values.push(value);
-      conditions.push(sql.replace('$?', `$${values.length}`));
-    };
-    if (req.query.batchId && uuidPattern.test(String(req.query.batchId))) add('f.batch_id=$?', req.query.batchId);
-    if (req.query.kind && ARCHIVE_KINDS.includes(String(req.query.kind))) add('f.kind=$?', String(req.query.kind));
-    if (req.query.status) add('f.status=$?', String(req.query.status).slice(0, 32));
-    if (req.query.directory) add("f.relative_path LIKE $?", `${String(req.query.directory).replace(/^\.+|\/+$/g, '')}/%`);
-    if (req.query.q) {
-      values.push(`%${String(req.query.q).slice(0, 120)}%`, `%${String(req.query.q).slice(0, 120)}%`);
-      const slot = values.length - 1;
-      conditions.push(`(f.name ILIKE $${slot} OR f.relative_path ILIKE $${slot + 1})`);
-    }
-    const sortMap = {
-      size_desc: 'f.size_bytes DESC',
-      size_asc: 'f.size_bytes ASC',
-      mtime_desc: 'f.source_mtime DESC NULLS LAST',
-      mtime_asc: 'f.source_mtime ASC NULLS LAST',
-      created_desc: 'f.created_at DESC',
-      created_asc: 'f.created_at ASC',
-      name_asc: 'f.name ASC',
-    };
-    const order = sortMap[String(req.query.sort || 'created_desc')] || sortMap.created_desc;
-    values.push(pageSize, (page - 1) * pageSize);
-    const { rows } = await pool.query(
-      `SELECT f.*, b.name AS batch_name, o.object_key, o.status AS object_status, o.verified_at
-         FROM archive_files f
-         JOIN archive_batches b ON b.id=f.batch_id
-         LEFT JOIN archive_objects o ON o.id=f.object_id
-        WHERE ${conditions.join(' AND ')}
-        ORDER BY ${order}, f.id ASC
-        LIMIT $${values.length - 1} OFFSET $${values.length}`,
-      values,
-    );
-    const countResult = await pool.query(
-      `SELECT COUNT(*)::int AS total FROM archive_files f WHERE ${conditions.join(' AND ')}`,
-      values.slice(0, values.length - 2),
-    );
-    res.json({
-      files: rows.map((row) => publicArchiveFile(row)),
-      total: countResult.rows[0].total,
-      page,
-      pageSize,
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get('/api/archive/files/:id', requireUser, async (req, res, next) => {
-  try {
-    const file = await ownedArchiveFile(req.params.id, req.user.id);
-    res.json({ file: publicArchiveFile(file, { downloadable: Boolean(file.object_key) }) });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.get('/api/archive/files/:id/preview', requireUser, async (req, res, next) => {
-  try {
-    const file = await ownedArchiveFile(req.params.id, req.user.id);
-    const base = {
-      id: file.id,
-      kind: file.kind,
-      name: file.name,
-      relativePath: file.relative_path,
-      mimeType: file.mime_type,
-      sizeBytes: Number(file.size_bytes || 0),
-      sha256: file.sha256 || '',
-      status: file.status,
-      hasObject: Boolean(file.object_key),
-      assetId: file.asset_id,
-    };
-    if (!file.object_key) return res.json({ preview: { ...base, type: 'unavailable', message: '文件尚未归档完成' } });
-    if (['image', 'video', 'audio'].includes(file.kind)) {
-      return res.json({ preview: { ...base, type: 'media', url: `/api/archive/files/${file.id}/content` } });
-    }
-    if (!isTextPreviewKind(file.name)) {
-      return res.json({ preview: { ...base, type: 'unsupported', message: '该格式不支持在线预览，可下载原文件' } });
-    }
-    if (Number(file.size_bytes) > archiveConfig.textPreviewMaxBytes) {
-      return res.json({ preview: { ...base, type: 'too_large', message: `文件超过 ${Math.round(archiveConfig.textPreviewMaxBytes / 1024 / 1024)} MB，仅支持下载` } });
-    }
-    const batch = await ownedArchiveBatch(file.batch_id, req.user.id);
-    const content = await readArchiveText(archiveStorage(batch.storage_backend), file.object_key, archiveConfig.textPreviewMaxBytes);
-    res.json({ preview: { ...base, type: 'text', truncated: content.bytes >= archiveConfig.textPreviewMaxBytes, content: content.text } });
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-app.get('/api/archive/files/:id/download', requireUser, async (req, res, next) => {
-  try {
-    const file = await ownedArchiveFile(req.params.id, req.user.id);
-    if (!file.object_key) return res.status(409).json({ error: '文件尚未归档完成，无法下载' });
-    const batch = await ownedArchiveBatch(file.batch_id, req.user.id);
-    const storage = archiveStorage(batch.storage_backend);
-    const filename = file.name || path.basename(file.relative_path);
-    if (storage.backend === 'cos') {
-      const url = await storage.signDownloadUrl(file.object_key, { filename });
-      if (!url) return res.status(500).json({ error: '生成下载地址失败' });
-      return res.redirect(302, url);
-    }
-    const stats = await fsp.stat(storage.objectPath(file.object_key));
-    res.set({
-      'Content-Type': file.mime_type || 'application/octet-stream',
-      'Content-Length': String(stats.size),
-      'Content-Disposition': archiveContentDisposition(filename, false),
-      'Cache-Control': streamCacheControl,
-    });
-    fs.createReadStream(storage.objectPath(file.object_key)).pipe(res);
-    return undefined;
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
-// 同源内联流：图片/视频/音频预览，下载走 /download。
-app.get('/api/archive/files/:id/content', requireUser, async (req, res, next) => {
-  try {
-    const file = await ownedArchiveFile(req.params.id, req.user.id);
-    if (!file.object_key) return res.status(409).json({ error: '文件尚未归档完成' });
-    const batch = await ownedArchiveBatch(file.batch_id, req.user.id);
-    const storage = archiveStorage(batch.storage_backend);
-    const total = Number(file.size_bytes || 0);
-    if (!total) return res.status(404).json({ error: '归档文件大小无效' });
-    const parsed = parseByteRange(req.headers.range, total);
-    if (parsed === 'invalid') return res.status(416).set('Content-Range', `bytes */${total}`).end();
-    const range = parsed ? parsed : { start: 0, end: total - 1 };
-    res.status(parsed ? 206 : 200).set({
-      'Content-Type': file.mime_type || 'application/octet-stream',
-      'Content-Length': String(range.end - range.start + 1),
-      'Accept-Ranges': 'bytes',
-      'Content-Disposition': archiveContentDisposition(file.name || path.basename(file.relative_path), true),
-      'Cache-Control': streamCacheControl,
-      ...(file.sha256 ? { ETag: `"${file.sha256}"` } : {}),
-      ...(parsed ? { 'Content-Range': `bytes ${range.start}-${range.end}/${total}` } : {}),
-    });
-    if (storage.backend === 'cos') {
-      await storage.pipeTo(file.object_key, res, range).catch((error) => {
-        if (!res.headersSent) next(error);
-      });
-    } else {
-      fs.createReadStream(storage.objectPath(file.object_key), { start: range.start, end: range.end }).pipe(res);
-    }
-    return undefined;
-  } catch (error) {
-    handleArchiveError(res, next, error);
-  }
-});
-
 // ==================== 百度网盘目录（只渲染目录元数据，不中转文件） ====================
-// 文件字节只在本机 MCP/CLI 和百度网盘之间流动；服务器只保存网盘目录节点，
-// 不持有百度 Token、不保存 dlink、也不提供网盘文件下载代理。
+// 文件字节只在本机 MCP/CLI 和百度网盘之间流动。服务器仅为当前登录用户
+// 加密保存一枚只读 Token，用于实时 list /AIGC；不保存 dlink，也不代理下载。
 const netdiskConfig = loadNetdiskConfig();
 const netdiskRepoRoot = path.resolve(__dirname, '..', '..');
 const NETDISK_SYNC_SCRIPT = 'skills/baidu-netdisk-archive/scripts/netdisk_sync.py';
+const netdiskCredentials = createCredentialStore({ pool });
+const netdiskListClient = createListClient();
+const netdiskLiveReader = createLiveDirectoryReader({
+  pool,
+  credentials: netdiskCredentials,
+  listClient: netdiskListClient,
+});
 
 function netdiskErrorHandler(res, next, error) {
-  if (error && error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+  if (error instanceof LiveError) {
+    const status = error.code === 'encryption_key_missing' ? 503 : 400;
+    return res.status(status).json({ error: error.message, errorCode: error.code });
+  }
+  if (error && error.statusCode) return res.status(error.statusCode).json({ error: error.message, errorCode: error.code || 'NETDISK_REQUEST_INVALID' });
   return next(error);
+}
+
+function encryptionConfigured() {
+  try {
+    readEncryptionKey();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function publicLiveLayer(layer) {
+  return {
+    ...layer,
+    fetchedAt: layer.fetchedAt ? new Date(layer.fetchedAt).toISOString() : null,
+    nodes: (layer.nodes || []).map(publicNode),
+  };
 }
 
 async function latestNetdiskSnapshot(userId) {
@@ -2634,14 +2061,64 @@ function publicSnapshot(row) {
   };
 }
 
-app.get('/api/netdisk/options', requireUser, (_req, res) => {
-  res.json({
-    options: {
-      rootPath: netdiskConfig.rootPath,
-      localCatalogFile: netdiskConfig.catalogImportFile,
-      syncScript: NETDISK_SYNC_SCRIPT,
-    },
-  });
+app.get('/api/netdisk/options', requireUser, async (req, res, next) => {
+  try {
+    const credential = netdiskCredentials.describe(await netdiskCredentials.load(req.user.id));
+    res.json({
+      options: {
+        rootPath: netdiskConfig.rootPath,
+        localCatalogFile: netdiskConfig.catalogImportFile,
+        syncScript: NETDISK_SYNC_SCRIPT,
+        authorizeUrl: AUTHORIZE_URL,
+        purpose: CREDENTIAL_PURPOSE,
+        encryptionConfigured: encryptionConfigured(),
+        credential,
+      },
+    });
+  } catch (error) {
+    netdiskErrorHandler(res, next, error);
+  }
+});
+
+app.get('/api/netdisk/credential', requireUser, async (req, res, next) => {
+  try {
+    res.json({ credential: netdiskCredentials.describe(await netdiskCredentials.load(req.user.id)) });
+  } catch (error) {
+    netdiskErrorHandler(res, next, error);
+  }
+});
+
+app.put('/api/netdisk/credential', requireUser, async (req, res, next) => {
+  try {
+    const pasted = req.body?.credential ?? req.body?.accessToken;
+    const saved = await netdiskCredentials.save(req.user.id, pasted);
+    try {
+      await netdiskListClient.listLayer(saved.token, netdiskConfig.rootPath);
+      await netdiskCredentials.markVerified(req.user.id);
+    } catch (error) {
+      if (error.code === 'token_invalid') {
+        await netdiskCredentials.markInvalid(req.user.id, '百度返回授权失效，请重新授权');
+      }
+      const credential = netdiskCredentials.describe(await netdiskCredentials.load(req.user.id));
+      return res.status(400).json({
+        error: error.message || '授权校验失败，请重新授权',
+        errorCode: error.code || 'credential_verify_failed',
+        credential,
+      });
+    }
+    return res.json({ credential: netdiskCredentials.describe(await netdiskCredentials.load(req.user.id)) });
+  } catch (error) {
+    return netdiskErrorHandler(res, next, error);
+  }
+});
+
+app.delete('/api/netdisk/credential', requireUser, async (req, res, next) => {
+  try {
+    await netdiskCredentials.remove(req.user.id);
+    res.json({ credential: netdiskCredentials.describe(await netdiskCredentials.load(req.user.id)) });
+  } catch (error) {
+    netdiskErrorHandler(res, next, error);
+  }
 });
 
 app.post('/api/netdisk/catalog', requireUser, async (req, res, next) => {
@@ -2669,40 +2146,19 @@ app.post('/api/netdisk/import-local-catalog', requireUser, async (req, res, next
   }
 });
 
-app.get('/api/netdisk/tree', requireUser, async (req, res, next) => {
+async function sendNetdiskLayer(req, res, next) {
   try {
-    const requested = normaliseNodePath(req.query.path || netdiskConfig.rootPath);
-    const snapshotPath = requested === netdiskConfig.rootPath ? requested : assertNetdiskPath(requested, netdiskConfig.rootPath);
-    const snapshot = await latestNetdiskSnapshot(req.user.id);
-    const { rows } = await pool.query(
-      `SELECT * FROM netdisk_nodes WHERE user_id=$1 AND parent_path=$2 ORDER BY is_dir DESC, name ASC`,
-      [req.user.id, snapshotPath],
-    );
-    res.json({
-      rootPath: netdiskConfig.rootPath,
-      path: snapshotPath,
-      nodes: rows.map(publicNode),
-      snapshot: publicSnapshot(snapshot),
-      needsSync: !snapshot || !rows.length,
-    });
+    const requestedPath = assertNetdiskPath(req.query.path || netdiskConfig.rootPath, netdiskConfig.rootPath);
+    const layer = await netdiskLiveReader.readLayer({ userId: req.user.id, dirPath: requestedPath });
+    res.json(publicLiveLayer(layer));
   } catch (error) {
     netdiskErrorHandler(res, next, error);
   }
-});
+}
 
-app.get('/api/netdisk/children', requireUser, async (req, res, next) => {
-  try {
-    const nodePath = assertNetdiskPath(req.query.path || netdiskConfig.rootPath, netdiskConfig.rootPath);
-    const { rows } = await pool.query(
-      'SELECT * FROM netdisk_nodes WHERE user_id=$1 AND parent_path=$2 ORDER BY is_dir DESC, name ASC',
-      [req.user.id, nodePath],
-    );
-    const snapshot = await latestNetdiskSnapshot(req.user.id);
-    res.json({ path: nodePath, nodes: rows.map(publicNode), snapshot: publicSnapshot(snapshot), needsSync: !snapshot || !rows.length });
-  } catch (error) {
-    netdiskErrorHandler(res, next, error);
-  }
-});
+// 两个路由都只读取当前一层；保留 /tree 是为了兼容上一版前端和本机工具。
+app.get('/api/netdisk/tree', requireUser, sendNetdiskLayer);
+app.get('/api/netdisk/children', requireUser, sendNetdiskLayer);
 
 app.get('/api/netdisk/search', requireUser, async (req, res, next) => {
   try {
@@ -2730,6 +2186,11 @@ app.get('/api/netdisk/search', requireUser, async (req, res, next) => {
 app.get('/api/netdisk/stats', requireUser, async (req, res, next) => {
   try {
     const snapshot = await latestNetdiskSnapshot(req.user.id);
+    const { rows: cacheRows } = await pool.query(
+      'SELECT MAX(updated_at) AS updated_at, COUNT(*)::int AS total FROM netdisk_nodes WHERE user_id=$1',
+      [req.user.id],
+    );
+    const cacheInfo = cacheRows[0] || {};
     const { rows } = await pool.query(
       `SELECT kind, COUNT(*)::int AS count, COALESCE(SUM(size_bytes),0)::bigint AS bytes
          FROM netdisk_nodes WHERE user_id=$1 AND is_dir=false GROUP BY kind`,
@@ -2752,9 +2213,12 @@ app.get('/api/netdisk/stats', requireUser, async (req, res, next) => {
     res.json({
       rootPath: netdiskConfig.rootPath,
       snapshot: publicSnapshot(snapshot),
+      fromCache: true,
+      cacheUpdatedAt: cacheInfo.updated_at || null,
+      cachedNodeCount: Number(cacheInfo.total || 0),
       byKind: rows.map((row) => ({ kind: row.kind, count: Number(row.count || 0), bytes: Number(row.bytes || 0) })),
       topDirectories: topDirs.map((row) => ({ path: row.path, name: row.name, totalBytes: Number(row.total_bytes || 0), fileCount: Number(row.file_count || 0) })),
-      needsSync: !snapshot,
+      needsSync: Number(cacheInfo.total || 0) === 0,
     });
   } catch (error) {
     netdiskErrorHandler(res, next, error);
@@ -2780,7 +2244,7 @@ app.get('/api/netdisk/sync-commands', requireUser, (req, res) => {
     commands,
     notes: [
       '上传和下载都只发生在本机和百度网盘之间，视频字节不会经过工作台服务器。',
-      '百度网盘 Token 只存在本机（环境变量或 ~/.config/aigc-workbench/baidu_netdisk_token），不进入服务器、数据库和前端。',
+      '上传/下载 Token 保存在本机 Skill；工作台另行加密保存当前用户的只读 Token，仅用于实时列目录。',
       '本 Skill 不会删除任何本地文件；清理本地需要你在确认网盘目录后手工操作。',
     ],
   });
@@ -2795,8 +2259,6 @@ async function start() {
   await fsp.mkdir(uploadDir, { recursive: true });
   const schema = await fsp.readFile(path.join(__dirname, '..', 'schema.sql'), 'utf8');
   await pool.query(schema);
-  // 进程重启后把未完成的活动状态恢复为可重试，避免把未完成批次误报为已完成
-  await archiveQueue.recoverInterruptedBatches().catch((error) => console.warn('archive recovery failed:', error.message));
   app.listen(port, '0.0.0.0', () => console.log(`AIGC Shelf API listening on ${port}`));
 }
 

@@ -1,0 +1,3 @@
+# 上传路径需要 requests 的连接池（urllib 每次请求都强制 Connection: close，
+# 无法 Keep-Alive，数千个请求会累积成数千次 TCP/TLS 握手）。
+requests>=2.31,<3
