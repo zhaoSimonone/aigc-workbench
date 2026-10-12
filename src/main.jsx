@@ -910,8 +910,7 @@ function Workspace({ user, onLogout }) {
     setDetailTrail([]);
     setSelected(asset);
   };
-  // 工作文档里的图片/视频会带 archive_file 对应的素材 ID，按 ID 打开现有素材详情抽屉
-  const openAssetById = (assetId) => {
+    const openAssetById = (assetId) => {
     const asset = assets.find((item) => item.id === assetId);
     if (!asset) {
       setLoadError("对应素材不存在，可能已被删除");
@@ -1504,7 +1503,7 @@ function Workspace({ user, onLogout }) {
                 MONDAY, AUG 31 <span className="eyebrow-dot" /> 09:46
               </p>
               <h1>{isPromptView ? "提示词库" : isMusicView ? "音乐库" : isArchiveView ? "工作文档" : "素材库"}</h1>
-              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : isArchiveView ? "把本机创作目录备份成可检索、可下载的工作文档。" : "把灵感收好，下一条作品会更快开始。"}</p>
+              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : isArchiveView ? "实时浏览百度网盘 /AIGC 目录，上传和下载继续由本机 Skill 完成。" : "把灵感收好，下一条作品会更快开始。"}</p>
             </div>
             <div className="intro-actions">
               {isArchiveView ? null : isVideoAccountView && (
@@ -1618,7 +1617,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、发型、场景照等分类查看。发型图仍只保存一份，同时出现在发型库。" : isSpecialLibraryView ? specialLibrary.subtitle : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、发型、场景照等分类查看。发型图仍只保存一份，同时出现在发型库。" : isSpecialLibraryView ? specialLibrary.subtitle : isArchiveView ? "目录元数据实时来自百度网盘；文件字节不经过工作台服务器。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1626,14 +1625,16 @@ function Workspace({ user, onLogout }) {
                   新建人物相册
                 </button>
               )}
-            <div className="sync-status">
-              <span className="sync-dot" />
+            {isArchiveView ? null : (
+              <div className="sync-status">
+                <span className="sync-dot" />
                 已同步 <b>腾讯云 COS · 数据库</b>
-            </div>
+              </div>
+            )}
           </div>
           {loadError && <div className="inline-error">{loadError}</div>}
           {isArchiveView ? (
-            <ArchivePanel onOpenAsset={openAssetById} />
+            <ArchivePanel />
           ) : isPromptView ? (
             <PromptLibrary
               prompts={prompts}

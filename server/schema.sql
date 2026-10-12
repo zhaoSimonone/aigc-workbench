@@ -155,6 +155,23 @@ CREATE INDEX IF NOT EXISTS archive_files_object_idx ON archive_files(object_id);
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS archive_file_id UUID REFERENCES archive_files(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS assets_user_archive_file_idx ON assets(archive_file_id) WHERE archive_file_id IS NOT NULL;
 
+-- 用户在网页里配置的百度网盘 Access Token。只存 AES-256-GCM 密文，
+-- 只用于 GET /api/list 读取 /AIGC 目录；服务器不上传、下载或删除网盘文件。
+CREATE TABLE IF NOT EXISTS netdisk_credentials (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'baidu_netdisk' CHECK (provider = 'baidu_netdisk'),
+  encrypted_token TEXT NOT NULL,
+  token_last4 TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalid','expired')),
+  expires_at TIMESTAMPTZ,
+  obtained_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_verified_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS netdisk_credentials_status_idx ON netdisk_credentials(status);
+
 -- 百度网盘目录快照：工作台只保存网盘目录元数据，不保存任何文件字节，
 -- 也不保存百度 Token 或 dlink。文件同步由本机 MCP/CLI 直传网盘完成。
 CREATE TABLE IF NOT EXISTS netdisk_snapshots (
