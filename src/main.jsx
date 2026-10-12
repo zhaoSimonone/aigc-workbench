@@ -47,6 +47,7 @@ import {
   X,
   Info,
 } from "lucide-react";
+import ArchivePanel from "./archive-panel.jsx";
 import "./styles.css";
 
 const media = "/media/";
@@ -63,6 +64,7 @@ const FOLDER_ROUTES = [
   ["prompts", "提示词库"],
   ["accounts", "视频账号"],
   ["music", "音乐库"],
+  ["documents", "工作文档"],
 ];
 
 function folderFromPath(pathname) {
@@ -732,6 +734,7 @@ function Workspace({ user, onLogout }) {
       { label: "提示词库", count: prompts.length, icon: FileText },
       { label: "视频账号", count: videoAccounts.length, icon: Users },
       { label: "音乐库", count: musicTracks.length, icon: Music2 },
+      { label: "工作文档", icon: FolderOpen },
     ],
     [assets, prompts, videoAccounts, musicTracks],
   );
@@ -834,6 +837,19 @@ function Workspace({ user, onLogout }) {
   const openAsset = (asset) => {
     setDetailTrail([]);
     setSelected(asset);
+  };
+  // 工作文档里的图片/视频会带 archive_file 对应的素材 ID，按 ID 打开现有素材详情抽屉
+  const openAssetById = (assetId) => {
+    const asset = assets.find((item) => item.id === assetId);
+    if (!asset) {
+      setLoadError("对应素材不存在，可能已被删除");
+      return;
+    }
+    setActiveFolder("全部素材");
+    setActiveCharacter("");
+    setActiveCharacterCategory("");
+    setActiveFilter("全部");
+    openAsset(asset);
   };
   const openRelatedAsset = (asset) => {
     setDetailTrail((trail) => (selected ? [...trail, selected] : trail));
@@ -1227,6 +1243,7 @@ function Workspace({ user, onLogout }) {
   const isPromptView = activeFolder === "提示词库";
   const isVideoAccountView = activeFolder === "视频账号";
   const isMusicView = activeFolder === "音乐库";
+  const isArchiveView = activeFolder === "工作文档";
   const displayStats = isPromptView ? promptStats : stats;
   const uploadDefaultFolder = LIBRARY_FOLDERS.includes(activeFolder)
     ? activeFolder
@@ -1272,7 +1289,7 @@ function Workspace({ user, onLogout }) {
                 strokeWidth={activeFolder === label ? 2.4 : 1.8}
               />
               <span>{label}</span>
-              <em>{count}</em>
+              {count === undefined ? null : <em>{count}</em>}
             </button>
           ))}
         </nav>
@@ -1411,11 +1428,11 @@ function Workspace({ user, onLogout }) {
               <p className="eyebrow">
                 MONDAY, AUG 31 <span className="eyebrow-dot" /> 09:46
               </p>
-              <h1>{isPromptView ? "提示词库" : isMusicView ? "音乐库" : "素材库"}</h1>
-              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : "把灵感收好，下一条作品会更快开始。"}</p>
+              <h1>{isPromptView ? "提示词库" : isMusicView ? "音乐库" : isArchiveView ? "工作文档" : "素材库"}</h1>
+              <p className="intro-copy">{isPromptView ? "把有效的方法留下，让下一次生成更接近你想要的结果。" : isMusicView ? "从视频提取音轨并去重，集中标记后续剪辑要用的音乐。" : isArchiveView ? "把本机创作目录备份成可检索、可下载的工作文档。" : "把灵感收好，下一条作品会更快开始。"}</p>
             </div>
             <div className="intro-actions">
-              {isVideoAccountView && (
+              {isArchiveView ? null : isVideoAccountView && (
                 <label className="account-search-box">
                   <Search size={15} />
                   <input
@@ -1503,7 +1520,9 @@ function Workspace({ user, onLogout }) {
                 <h2>
                   {libraryTitle}{" "}
                   <span>
-                    {isPromptView
+                    {isArchiveView
+                      ? ""
+                      : isPromptView
                       ? `${prompts.length} 条提示词`
                       : isVideoAccountView
                       ? accountQuery.trim()
@@ -1516,7 +1535,7 @@ function Workspace({ user, onLogout }) {
                       : filteredAssets.length !== assets.length
                       ? `${filteredAssets.length} / `
                       : ""}
-                    {!isRoleAlbumView && !isVideoAccountView && !isPromptView && total}
+                    {!isRoleAlbumView && !isVideoAccountView && !isPromptView && !isArchiveView && total}
                   </span>
                 </h2>
                 {activeCharacter && (
@@ -1524,7 +1543,7 @@ function Workspace({ user, onLogout }) {
                     <ChevronDown size={14} /> 返回角色相册
                   </button>
                 )}
-                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
+                <p>{isRoleAlbumView ? "按人物聚合，进入相册后再按正脸、场景照等分类查看。" : isArchiveView ? "扫描本机目录创建归档批次，图片和视频会同时进入素材库。" : isPromptView ? "完整保存有效提示词，并关联输入素材和生成作品。" : isVideoAccountView ? "收藏值得持续关注的创作者，按平台集中管理。" : isMusicView ? "相同标准化音频只保留一份；曲名和艺人由你人工确认。" : "你的创作参考与工作文件，集中在这里。"}</p>
               </div>
               {isRoleAlbumView && (
                 <button className="secondary-button album-create-button" onClick={() => setShowAlbumCreator(true)}>
@@ -1538,7 +1557,9 @@ function Workspace({ user, onLogout }) {
             </div>
           </div>
           {loadError && <div className="inline-error">{loadError}</div>}
-          {isPromptView ? (
+          {isArchiveView ? (
+            <ArchivePanel onOpenAsset={openAssetById} />
+          ) : isPromptView ? (
             <PromptLibrary
               prompts={prompts}
               assets={assets}

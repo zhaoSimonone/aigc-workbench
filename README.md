@@ -93,6 +93,93 @@ python3 skills/aigc-asset-organize/scripts/organize_assets.py music-library --bu
 
 `.env.example` 已写入桶名和区域占位符（当前桶实际地域为 `ap-shanghai`）。域名 `aigc.chatcanvas.online` 可在 Nginx 中反向代理到 Vite 构建产物和服务端 API；不要把 `/Users/simon/Desktop/dev/cloud/tencent` 下的凭据目录复制到仓库。
 
+## 工作文档：百度网盘目录 + 本地归档
+
+侧边栏“工作文档”（路由 `/documents`）默认是一个**百度网盘目录浏览器**。创作目录里的视频、图片和工程文件由本机 Skill 直传百度网盘，工作台只渲染网盘目录元数据。
+
+| 内容 | 存在哪里 | 谁负责传输 |
+| --- | --- | --- |
+| 创作目录的视频、素材、工程文件 | 百度网盘 `/AIGC/...` | 本机 MCP/CLI，不经过工作台服务器 |
+| 目录树、文件名、大小、网盘修改时间 | PostgreSQL `netdisk_nodes` | 本机同步清单，服务器只收 JSON |
+| 素材库里已在 COS 的小图和封面 | 腾讯云 COS | 现有上传链路，保持不变 |
+
+COS 50 GB / 年的容量包不适合当视频备份盘，视频备份走百度网盘；COS 只保留给需要在网页里直接预览的小文件。
+
+### 同步一个目录到网盘
+
+上传和下载都发生在**本机与百度网盘之间**，文件字节不会经过工作台服务器：
+
+```bash
+# ① 先看清单，不实际上传
+python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
+  /Users/simon/Desktop/AIGC/1007视频 --dest /AIGC/1007视频 --dry-run
+
+# ② 确认无误后去掉 --dry-run
+python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
+  /Users/simon/Desktop/AIGC/1007视频 --dest /AIGC/1007视频
+
+# ③ 列出网盘目录
+python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py tree --root /AIGC --json
+
+# ④ 写出目录快照，让工作台能渲染
+python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py publish-catalog --root /AIGC
+```
+
+`publish-catalog` 默认写到 `outputs/netdisk-catalog.json`，然后在“工作文档”页点“刷新目录”，或让它直接发布：
+
+```bash
+python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py publish-catalog \
+  --root /AIGC --api http://127.0.0.1:18080/api/netdisk/catalog --cookie-env AIGC_SESSION_COOKIE
+```
+
+不上传文件时，工作台提供一个本机降级导入接口，只读取仓库内固定白名单文件 `outputs/netdisk-catalog.json`：
+
+```bash
+curl -X POST http://127.0.0.1:18080/api/netdisk/import-local-catalog \
+  -H 'Content-Type: application/json' -b 'aigc_session=<工作台会话>' -d '{}'
+```
+
+### 网盘凭据
+
+百度 Token **只存在本机**：`BAIDU_NETDISK_ACCESS_TOKEN` 环境变量或 `~/.config/aigc-workbench/baidu_netdisk_token`。工作台服务器不配置、不转发、不缓存它，数据库里也没有。`list` / `tree` / `publish-catalog` 的输出统一清洗过，不含 `access_token`、`dlink`、`cookie`、`session_secret`；catalog 接口会直接拒绝带这些字段或带文件内容的请求体。
+
+`.env.example` 只说明这一点，不要把真实 Token 写进任何仓库文件。
+
+### 网盘目录接口
+
+```text
+GET  /api/netdisk/options              网盘根目录与脚本路径
+POST /api/netdisk/catalog              提交目录节点 JSON（mcp/cli）
+POST /api/netdisk/import-local-catalog 读取本机 outputs/netdisk-catalog.json
+GET  /api/netdisk/tree?path=/AIGC      指定目录的直接子节点
+GET  /api/netdisk/children?path=...    同上
+GET  /api/netdisk/search?q=&kind=      按文件名搜索
+GET  /api/netdisk/stats                快照时间、类型分布、一级目录
+GET  /api/netdisk/sync-commands        可复制的本机命令
+```
+
+所有路径必须位于 `/AIGC` 前缀内（`NETDISK_ROOT_PATH` 可配置），否则返回 400。`netdisk_nodes` 按 `user_id + path` 唯一，一次发布在事务里完成：写快照 → upsert 节点 → 仅当快照 `complete=true` 且节点清单非空时删除已消失节点。发布工作台登录态请用 `--cookie-env`，不要把 Cookie 写在命令行里。
+
+### 数据库迁移
+
+`netdisk_snapshots` 和 `netdisk_nodes` 写在 `server/schema.sql`，使用 `IF NOT EXISTS`，可重复执行。API 启动时自动执行整份 schema，重启即完成迁移。
+
+### 旧版对象存储归档（已降级）
+
+原“扫描本地目录 → 服务器计算 SHA-256 → 上传 COS/local”的功能保留在“工作文档”页底部的折叠区“旧版对象存储归档”，代码和 `archive_*` 表都还在。它只适合必须放对象存储的小文件；视频备份不要走这条路，它会让大文件流量穿过服务器并持续消耗 COS 容量。详细的环境变量、批次 API 和清理流程见 `docs/本地目录归档与工作文档备份-方案设计.md`。
+
+### 自检脚本
+
+```bash
+python3 -m py_compile skills/baidu-netdisk-archive/scripts/netdisk_sync.py
+node server/scripts/netdisk-check.js        # 目录解析、白名单、事务写入（内存 SQL 桩）
+node server/scripts/netdisk-http-check.js   # 真实 Express 路由 + 真实目录快照
+node server/scripts/archive-check.js        # 旧版 COS 归档逻辑
+node server/scripts/archive-http-check.js   # 旧版归档路由
+```
+
+`netdisk-http-check.js` 会用 `outputs/netdisk-catalog.json`（若存在）真实走一遍导入与树查询，全程不连接真实数据库、不上传任何文件。
+
 ## 蕾姆视频妆造 Skill
 
 `skills/rem-video-look-designer` 已配置 hairfree 图像接口、`gpt-image-2`、竖屏尺寸、high 质量和 JSON generations 请求。生成脚本只从环境变量读取 `IMAGE_API_KEY`；其余默认值已内置，也可用 `.env.example` 中的 `IMAGE_API_BASE`、`IMAGE_MODEL`、`IMAGE_SIZE`、`IMAGE_QUALITY` 和 `IMAGE_ENDPOINT_MODE` 覆盖。不要把实际密钥写入仓库。

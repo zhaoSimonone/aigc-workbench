@@ -1,0 +1,3 @@
+interface:
+  display_name: "百度网盘归档"
+  short_description: "本机直传百度网盘：分片上传并逐片校验、列出网盘目录树、把目录快照发布到 AIGC 工作台"
