@@ -8,3 +8,8 @@ outputs/
 __pycache__/
 .idea/
 .myflicker/
+# Agent Bridge runtime state (templates and schemas under docs/agent-bridge remain tracked)
+docs/agent-bridge/current-task.md
+docs/agent-bridge/current-result.md
+docs/agent-bridge/state.json
+docs/agent-bridge/history/
