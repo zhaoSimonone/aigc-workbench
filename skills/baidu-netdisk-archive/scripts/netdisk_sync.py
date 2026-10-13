@@ -53,6 +53,16 @@ DEFAULT_DEST = "/AIGC"
 RETRYABLE = {-6, -8, -11, 112, 158}
 MAX_ATTEMPTS = 4
 
+# 600 = 列举目录失败，实测是偶发的，只在 /api/list 上出现。
+# 它**只在列举这一处**额外重试：塞进全局集合会让 precreate/create/quota 也去
+# 重试一个它们根本不返回的 errno；而列举失败若被当成空目录，已存在的文件会被
+# 误判为"需要上传"。
+LIST_EXTRA_RETRYABLE = {600}
+
+# 远端目录确实不存在（errno -9）才可以当作空目录；其余任何错误都必须中止，
+# 绝不能"当成空目录继续"。
+DIR_NOT_FOUND_ERRNO = -9
+
 ALLOWED_CHUNK_SIZES = (4, 8, 16, 32)
 MIB = 1024 * 1024
 
@@ -157,13 +167,19 @@ def call(token, path, params=None, body=None, method="POST"):
         raise NetdiskError(f"{path} 返回了非 JSON 响应：{raw[:200]!r}")
 
 
-def call_retry(token, path, params=None, body=None, method="POST", session=None):
+def call_retry(token, path, params=None, body=None, method="POST", session=None, extra_retryable=None):
     """Retry a small JSON control request.
 
     Upload workers pass their thread-local requests.Session so precreate/create
     share the same keep-alive pool as locateupload and block upload. Read-only
     commands and serial planning keep the legacy urllib path for compatibility.
+
+    ``extra_retryable`` adds errno values that are retryable *for this call
+    site only*, so one endpoint's quirk never widens the retry policy of the
+    whole client. Exhausted attempts raise: a caller must never be able to read
+    a failure as "empty".
     """
+    retryable = RETRYABLE | set(extra_retryable or ())
     last = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -178,7 +194,7 @@ def call_retry(token, path, params=None, body=None, method="POST", session=None)
         else:
             if result.get("errno", 0) == 0:
                 return result
-            if result.get("errno") not in RETRYABLE:
+            if result.get("errno") not in retryable:
                 return result
             last = NetdiskError(f"errno={result.get('errno')} {result.get('errmsg', '')}")
         if attempt < MAX_ATTEMPTS:
@@ -280,8 +296,8 @@ def ensure_dirs(token, remote_dir, cache):
 def list_dir(token, remote_dir):
     """Return {filename: size} for one remote directory. Empty when absent.
 
-    Stay tolerant on purpose: the upload path calls this for target directories
-    that may not exist yet, and used to treat a failed listing as "empty".
+    A directory that genuinely does not exist yet (errno -9) reads as empty so
+    the upload path can create it; every other error is raised.
     """
     entries = {}
     for item in list_entries(token, remote_dir, strict=False):
@@ -293,8 +309,13 @@ def list_entries(token, remote_dir, strict=True):
     """Return the raw item dicts of one remote directory, paging to the end.
 
     Baidu caps a listing at `num` entries, so every page of the same level must
-    be pulled or the caller silently loses files. Listing commands want a hard
-    error here; the upload path keeps the historical lenient behaviour.
+    be pulled or the caller silently loses files.
+
+    ``strict=True`` raises on every errno, including -9: a caller that asked
+    whether a directory exists wants "no" as an answer, not silence.
+    ``strict=False`` maps only errno -9 to an empty listing, for the upload
+    path that legitimately needs to create missing directories. Transient
+    listing errno 600 is retried here, and only here, before giving up.
     """
     items = []
     page = 1
@@ -304,12 +325,18 @@ def list_entries(token, remote_dir, strict=True):
             params={"dir": remote_dir, "web": "1", "page": str(page),
                     "num": "1000", "order": "name", "desc": "0"},
             method="GET",
+            extra_retryable=LIST_EXTRA_RETRYABLE,
         )
         if result.get("errno") != 0:
-            if strict:
-                raise NetdiskError(
-                    f"列出 {remote_dir} 失败：errno={result.get('errno')} {result.get('errmsg')}")
-            return items
+            errno = result.get("errno")
+            errmsg = result.get("errmsg")
+            # 只有「调用方明确说不介意 + 目录确实不存在」才是合法的空目录。
+            # strict=True 下 -9 同样要抛错；任何其它 errno（含重试耗尽的 600）
+            # 在两种模式下都必须中止，绝不能返回空列表继续。
+            if not strict and errno == DIR_NOT_FOUND_ERRNO:
+                return items
+            raise NetdiskError(
+                f"列出 {remote_dir} 失败：errno={errno} {errmsg}")
         batch = result.get("list", [])
         items.extend(batch)
         if len(batch) < 1000:

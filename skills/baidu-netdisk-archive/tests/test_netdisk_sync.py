@@ -847,6 +847,82 @@ class ChunkFallbackTests(unittest.TestCase):
         self.assertEqual(result.code, ns.ERR_CHUNK_SIZE)
 
 
+class ListErrnoTests(unittest.TestCase):
+    """errno=600 只在列举时重试；strict 语义严格；任何失败都不得读成空目录。"""
+
+    def test_600_not_in_global_retryable(self):
+        """600 是列举接口的毛病，不能污染 precreate/create/quota 的重试策略。"""
+        self.assertNotIn(600, ns.RETRYABLE)
+        self.assertEqual(ns.LIST_EXTRA_RETRYABLE, {600})
+
+    def test_600_retried_on_list(self):
+        seq = [{"errno": 600}, {"errno": 600}, {"errno": 0, "list": []}]
+        with mock.patch.object(ns, "call", side_effect=seq) as call, \
+             mock.patch.object(ns, "backoff_sleep"):
+            result = ns.call_retry(FAKE_TOKEN, "/api/list", method="GET",
+                                   extra_retryable=ns.LIST_EXTRA_RETRYABLE)
+        self.assertEqual(result["errno"], 0)
+        self.assertEqual(call.call_count, 3, "600 必须退避重试")
+
+    def test_600_not_retried_without_extra(self):
+        """不传 extra_retryable 时 600 直接返回，不浪费 4 次往返。"""
+        with mock.patch.object(ns, "call", return_value={"errno": 600}) as call:
+            result = ns.call_retry(FAKE_TOKEN, "/api/precreate", body={})
+        self.assertEqual(result["errno"], 600)
+        self.assertEqual(call.call_count, 1)
+
+    def test_list_passes_extra_retryable(self):
+        with mock.patch.object(ns, "call_retry", return_value={"errno": 0, "list": []}) as cr:
+            ns.list_entries(FAKE_TOKEN, "/AIGC", strict=True)
+        self.assertEqual(cr.call_args.kwargs.get("extra_retryable"), ns.LIST_EXTRA_RETRYABLE)
+
+    def test_retry_exhaustion_raises_after_bounded_attempts(self):
+        with mock.patch.object(ns, "call", return_value={"errno": 600}) as call, \
+             mock.patch.object(ns, "backoff_sleep"):
+            with self.assertRaises(ns.NetdiskError):
+                ns.call_retry(FAKE_TOKEN, "/api/list", method="GET",
+                              extra_retryable=ns.LIST_EXTRA_RETRYABLE)
+        self.assertEqual(call.call_count, ns.MAX_ATTEMPTS, "必须是限定次数，不能无限重试")
+
+    def test_strict_true_raises_on_missing_directory(self):
+        """strict=True 语义恢复：-9 也必须抛错，调用方要的是"不存在"这个答案。"""
+        with mock.patch.object(ns, "call", return_value={"errno": -9}):
+            with self.assertRaises(ns.NetdiskError):
+                ns.list_entries(FAKE_TOKEN, "/AIGC/不存在", strict=True)
+
+    def test_strict_false_maps_only_minus9_to_empty(self):
+        with mock.patch.object(ns, "call", return_value={"errno": -9}):
+            self.assertEqual(ns.list_entries(FAKE_TOKEN, "/AIGC/待创建", strict=False), [])
+
+    def test_permission_error_raises_in_both_modes(self):
+        for strict in (True, False):
+            with mock.patch.object(ns, "call", return_value={"errno": 1, "errmsg": "no permission"}):
+                with self.assertRaises(ns.NetdiskError, msg=f"strict={strict}"):
+                    ns.list_entries(FAKE_TOKEN, "/AIGC/x", strict=strict)
+
+    def test_600_exhausted_never_reads_as_empty(self):
+        """关键回归：一旦当成空目录，已存在文件会被误判为需要上传。"""
+        for strict in (True, False):
+            with mock.patch.object(ns, "call", return_value={"errno": 600}), \
+                 mock.patch.object(ns, "backoff_sleep"):
+                with self.assertRaises(ns.NetdiskError, msg=f"strict={strict}"):
+                    ns.list_entries(FAKE_TOKEN, "/AIGC/已有文件", strict=strict)
+
+    def test_build_plan_aborts_when_listing_fails(self):
+        import tempfile as _tf
+        directory = _tf.mkdtemp()
+        try:
+            with open(os.path.join(directory, "a.mp4"), "wb") as fh:
+                fh.write(b"x" * 100)
+            with mock.patch.object(ns, "call", return_value={"errno": 600}), \
+                 mock.patch.object(ns, "backoff_sleep"):
+                with self.assertRaises(ns.NetdiskError):
+                    ns.build_plan(FAKE_TOKEN, "/AIGC", ns.collect(directory, ["*.DS_Store"], []), False, {})
+        finally:
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+
 class BackwardCompatTests(unittest.TestCase):
     """14.7 -- read-only commands still parse and behave."""
 
