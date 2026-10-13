@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aigc-workbench-agent-bridge-result",
+  "type": "object",
+  "required": ["taskId", "status", "summary", "nextAction"],
+  "properties": {
+    "taskId": {"type": "string", "minLength": 1},
+    "status": {"enum": ["needs_review", "completed", "completed_with_deferred", "blocked", "failed"]},
+    "summary": {"type": "string", "minLength": 1},
+    "nextAction": {"type": "string", "minLength": 1},
+    "counts": {"type": "object"}
+  }
+}
