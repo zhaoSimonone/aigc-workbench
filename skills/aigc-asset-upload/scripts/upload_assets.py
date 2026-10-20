@@ -25,7 +25,27 @@ ALLOWED_FOLDERS = [
     "服装库",
     "发型库",
     "通用片段",
+    "GIF 素材",
 ]
+
+# GIF 是 GIF 素材的默认落点：它唯一的用途就是作为视频上的动态遮挡层。
+# 用户显式指定了文件夹时不覆盖——显式意图永远优先。
+GIF_FOLDER = "GIF 素材"
+DEFAULT_FOLDER = "灵感收集"
+
+
+def is_gif_path(file_path):
+    return Path(file_path).suffix.lower() == ".gif"
+
+
+def resolve_folder(explicit_folder, file_path):
+    """决定素材落库位置。
+
+    优先级：manifest/CLI 显式指定 > 文件类型默认（GIF → GIF 素材）> 灵感收集。
+    """
+    if explicit_folder:
+        return explicit_folder
+    return GIF_FOLDER if is_gif_path(file_path) else DEFAULT_FOLDER
 
 
 class MultipartBody:
@@ -230,7 +250,7 @@ def parse_args():
     parser.add_argument("--source", default="本地导入")
     parser.add_argument("--source-url", default="")
     parser.add_argument("--tags", default="待整理", help="以空格或逗号分隔")
-    parser.add_argument("--folder", default="灵感收集", choices=ALLOWED_FOLDERS, help="整批默认文件夹，可被 --manifest 逐文件覆盖")
+    parser.add_argument("--folder", default=None, choices=ALLOWED_FOLDERS, help="整批默认文件夹，可被 --manifest 逐文件覆盖；不指定时 GIF 自动进 GIF 素材，其余进 灵感收集")
     parser.add_argument("--manifest", default="", help="逐文件元数据 JSON：{items:[{path,folder,name,tags}]}，路径必须是绝对路径")
     parser.add_argument("--used", action="store_true")
     parser.add_argument("--character-name", default="")
@@ -292,7 +312,9 @@ def load_manifest(manifest_path, files):
         if isinstance(tags, str):
             tags = split_tags(tags)
         elif isinstance(tags, list):
-            tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+            # 数组分支也要按空格拆：服务端 parseTags 收到数组时不会拆元素，
+            # manifest 写成 ["甲 乙 丙"] 会原样存成一个带空格的标签
+            tags = split_tags(" ".join(str(tag) for tag in tags))
         elif tags is None:
             tags = None
         else:
@@ -413,7 +435,7 @@ def main():
             "sourceUrl": entry.get("sourceUrl") or args.source_url,
             "tags": file_tags,
             "used": args.used,
-            "folder": entry.get("folder") or args.folder,
+            "folder": resolve_folder(entry.get("folder") or args.folder, file_path),
             "characterName": entry.get("characterName") or args.character_name,
             "characterCategory": entry.get("characterCategory") or args.character_category,
             "parentAssetIds": args.parent_asset_ids,

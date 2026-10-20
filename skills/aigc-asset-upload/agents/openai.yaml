@@ -1,4 +1,4 @@
 interface:
   display_name: "AIGC 素材上传"
-  short_description: "按内容路由到服装/发型/通用片段等库并命名打标签"
-  default_prompt: "使用 $aigc-asset-upload 将我指定的视频或图片上传到对应的 AIGC 素材库，并根据画面命名、打标签。"
+  short_description: "按内容路由到服装/发型/通用片段/遮挡等库并命名打标签"
+  default_prompt: "使用 $aigc-asset-upload 将我指定的视频、图片或 GIF 上传到对应的 AIGC 素材库，并根据画面命名、打标签。"

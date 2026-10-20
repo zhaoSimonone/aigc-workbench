@@ -31,7 +31,7 @@ function extract(name) {
 }
 
 const BODY = ['readVideoDuration', 'scoreGrayFrame', 'extractGrayFrame', 'pickPreviewTime',
-  'writeVideoPreview', 'renderPreviewImage', 'createAssetPreview'].map(extract).join('\n\n');
+  'writeVideoPreview', 'renderPreviewImage', 'isGifMime', 'createAssetPreview'].map(extract).join('\n\n');
 
 /**
  * @param {object} options
@@ -158,6 +158,30 @@ async function test(name, fn) {
     const r = await createAssetPreview('audio', FILE, KEY, 'T');
     assert.deepStrictEqual(r, { thumbKey: null, durationSeconds: null });
     assert.strictEqual(calls.render, 0);
+  });
+
+  await test('GIF 不生成静态首帧缩略图，也不调用 ffmpeg', async () => {
+    const { createAssetPreview, calls } = load();
+    const r = await createAssetPreview('image', FILE, KEY, 'T', 'image/gif');
+    assert.deepStrictEqual(r, { thumbKey: null, durationSeconds: null });
+    assert.strictEqual(calls.render, 0, 'GIF 不该被抽成静态帧');
+    assert.strictEqual(calls.put.length, 0, 'GIF 不该产生缩略图对象');
+  });
+
+  await test('非 GIF 图片仍然照常生成缩略图', async () => {
+    const { createAssetPreview, calls } = load();
+    const r = await createAssetPreview('image', FILE, KEY, 'T', 'image/png');
+    assert.strictEqual(r.thumbKey, `${KEY}.jpg`);
+    assert.strictEqual(calls.render, 1);
+  });
+
+  await test('isGifMime 只认 image/gif', async () => {
+    const { createAssetPreview } = load();
+    // 通过 createAssetPreview 间接验证：只有真的是 GIF 才跳过缩略图
+    const gif = await createAssetPreview('image', FILE, KEY, 'T', 'image/gif');
+    const png = await createAssetPreview('image', FILE, KEY, 'T', 'image/png');
+    assert.strictEqual(gif.thumbKey, null);
+    assert.strictEqual(png.thumbKey, `${KEY}.jpg`);
   });
 
   console.log(`\n通过 ${passed} 项，失败 ${failed} 项\n`);

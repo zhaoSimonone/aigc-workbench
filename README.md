@@ -13,13 +13,35 @@
 - 服装库：沉淀可复用的服装参考，按颜色、品类和细节检索，对应 `/outfits`
 - 发型库：跨角色复用的发型参考，按发色和款式检索，对应 `/hairstyles`
 - 通用片段：可直接用于后续剪辑的视频片段，按发型与服装组合检索，对应 `/clips`
+- GIF 素材：用于视频遮挡的 GIF 动画与贴纸，网格和详情里直接播放动画，对应 `/gif`
 - 人物相册可设置固定封面：在角色相册卡片上点击封面按钮，从相册素材中任选一张固定为封面；未设置时默认展示最新素材
 - 注册/登录与按账号隔离的数据，可将创作作品关联到多个参考素材
 - 桌面端与移动端布局
 
 演示资源来自 `/Users/simon/Desktop/AIGC`，已复制到 `public/media` 作为可运行的样例。生产版本使用 Node.js API、PostgreSQL 和腾讯云 COS；浏览器只保存 HttpOnly 会话 Cookie，不保存密码或 COS 密钥。
 
-服装库、发型库、通用片段都复用现有素材表，不新建业务表。本机的服装参考图和通用片段目录可以通过 `aigc-asset-upload` 导入：脚本会先判定目标库，再按画面特征生成中文标题和标签，同一批次可以写入不同文件夹（见该 skill 的 `--manifest`）。生产环境不需要依赖任何本机绝对路径。
+服装库、发型库、通用片段、 GIF 素材都复用现有素材表，不新建业务表。本机的服装参考图和通用片段目录可以通过 `aigc-asset-upload` 导入：脚本会先判定目标库，再按画面特征生成中文标题和标签，同一批次可以写入不同文件夹（见该 skill 的 `--manifest`）。生产环境不需要依赖任何本机绝对路径。
+
+## GIF 素材（GIF）
+
+「 GIF 素材」库专门存放叠在视频上做遮挡的 GIF 动画和贴纸，对应工作台左侧的「 GIF 素材」页签（`/gif`）。
+
+- GIF 走图片通道入库：`type=image`、`content_type=image/gif`，不占用 `assets.type` 的枚举位，也不需要数据库迁移。
+- 服务端**不给 GIF 生成静态首帧缩略图**——抽成 JPG 会让网格里的 GIF 素材变成一张静止画面。前端直接播放原始 GIF 对象。
+- GIF 的展示地址用 24 小时窗口的稳定签名 URL，普通图片仍走短期 SDK 签名 URL（见 `docs/方案-缩略图与可缓存URL-实施任务书.md`）。
+- `aigc-asset-upload` 兼容 `.gif`：不指定 `--folder` 时 GIF 自动进 `GIF 素材`，其余文件进 `灵感收集`；显式指定的文件夹永远优先。
+- 取用：`skills/video-overlay-censor/scripts/fetch_overlay.py` 按素材 ID 把 GIF 拉到本机 `~/.config/aigc-workbench/gif/`，再交给 `apply_overlay.py` 合成到视频上。
+
+```bash
+# 列出 GIF 素材库
+python3 skills/video-overlay-censor/scripts/fetch_overlay.py --list
+
+# 取一条到本地并直接合成
+OVERLAY=$(python3 skills/video-overlay-censor/scripts/fetch_overlay.py --asset-id <素材 ID>)
+python3 skills/video-overlay-censor/scripts/apply_overlay.py \
+  --input input.mp4 --overlay "$OVERLAY" --output output.mp4 \
+  --start 3.45 --width 270 --height 190
+```
 
 ## 本地运行
 

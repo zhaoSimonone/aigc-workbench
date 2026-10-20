@@ -244,11 +244,14 @@ async function renderPreviewImage(type, filePath, previewPath) {
 // 抽帧偶发失败（临时文件 IO 竞争、ffmpeg 超时等）不应连坐掉时长，
 // 否则素材会永久停留在“待识别”且没有封面。渲染与上传各自独立兜底，
 // 渲染失败时再退回逐帧抽取，保证可用时仍能拿到封面。
-async function createAssetPreview(type, filePath, objectKey, warningLabel = '') {
+async function createAssetPreview(type, filePath, objectKey, warningLabel = '', mimeType = '') {
   const previewPath = `${filePath}.jpg`;
   let durationSeconds = null;
   try {
     if (type !== 'video' && type !== 'image') return { thumbKey: null, durationSeconds: null };
+    // GIF 不抽静态首帧：素材库要展示的正是它的动画，截成 JPG 会让
+    // GIF 素材在网格和详情里变成一张静止画面。改由前端直接播放 GIF。
+    if (isGifMime(mimeType)) return { thumbKey: null, durationSeconds: null };
     try {
       durationSeconds = await renderPreviewImage(type, filePath, previewPath);
     } catch (error) {
@@ -359,8 +362,8 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
   const objectKey = `${userId}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalName)}`;
   let thumbKey = null;
   try {
-    await putObject(objectKey, tempPath, mimeType);
-    const preview = await createAssetPreview(type, tempPath, objectKey, 'Imported asset');
+    await putObject(objectKey, tempPath, mimeType, mediaCacheControl);
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Imported asset', mimeType);
     thumbKey = preview.thumbKey;
     const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
@@ -407,10 +410,16 @@ function assetTypeFromMime(mimeType) {
   return mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('video/') ? 'video' : '';
 }
 
+// GIF 是唯一需要「保持动画」的素材类型：它没有独立缩略图，
+// 展示的就是原始对象本身。靠 content_type 判定，不靠文件后缀。
+function isGifMime(mimeType) {
+  return String(mimeType || '').split(';')[0].trim().toLowerCase() === 'image/gif';
+}
+
 async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
   let thumbKey = null;
   try {
-    const preview = await createAssetPreview(type, tempPath, objectKey, 'Uploaded asset');
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Uploaded asset', mimeType);
     thumbKey = preview.thumbKey;
     const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
@@ -449,13 +458,20 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
 
 async function hydrateAsset(row) {
   const [url, thumbUrl] = await Promise.all([
-    row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`) : objectUrl(row.object_key),
+    row.type === 'video'
+      ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`)
+      : isGifMime(row.content_type)
+        // GIF 用稳定签名 URL：它是网格里直接播放的对象，URL 每次刷新都变会
+        // 让浏览器缓存失效、反复重下整批动画。普通图片仍走短期 SDK 签名。
+        ? Promise.resolve(stableSignedUrl(row.object_key))
+        : objectUrl(row.object_key),
     row.thumb_key ? Promise.resolve(stableSignedUrl(row.thumb_key)) : Promise.resolve(''),
   ]);
   return {
     id: row.id,
     name: row.name,
     type: row.type,
+    contentType: row.content_type || '',
     source: row.source,
     sourceUrl: row.source_url,
     characterName: row.character_name || '',
@@ -573,12 +589,16 @@ async function albumCoverMap(userId, assetIds) {
   const covers = new Map();
   if (!ids.length) return covers;
   const { rows } = await pool.query(
-    'SELECT id, type, object_key, thumb_key, sha256 FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
+    'SELECT id, type, content_type, object_key, thumb_key, sha256 FROM assets WHERE user_id=$1 AND deleted_at IS NULL AND id = ANY($2::uuid[])',
     [userId, ids],
   );
   await Promise.all(rows.map(async (row) => {
     const [src, thumb] = await Promise.all([
-      row.type === 'video' ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`) : objectUrl(row.object_key),
+      row.type === 'video'
+        ? Promise.resolve(`/api/assets/${row.id}/stream?v=${encodeURIComponent(row.sha256 || row.object_key)}`)
+        : isGifMime(row.content_type)
+          ? Promise.resolve(stableSignedUrl(row.object_key))
+          : objectUrl(row.object_key),
       row.thumb_key ? Promise.resolve(stableSignedUrl(row.thumb_key)) : Promise.resolve(''),
     ]);
     covers.set(row.id, { id: row.id, src, thumb });
@@ -1096,17 +1116,41 @@ app.post('/api/assets/check-hashes', requireUser, async (req, res, next) => {
 
 app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
+    // 先分别聚合标签和关系，再回连素材。直接同时 JOIN 三张多行表会产生
+    // tags × parents × derived 的中间结果，素材越多、关系越多，首屏越慢。
     const { rows } = await pool.query(
-      `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
-          COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
-          COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
+      `SELECT a.id, a.name, a.type, a.source, a.source_url, a.character_name,
+          a.character_category, a.object_key, a.thumb_key, a.content_type,
+          a.size_bytes, a.sha256, a.duration_seconds, a.folder, a.note,
+          a.music_title, a.music_artist, a.music_source, a.music_status,
+          a.music_confidence, a.music_evidence, a.favorite, a.used, a.created_at,
+          COALESCE(tags.tags, '{}') AS tags,
+          COALESCE(parents.parent_asset_ids, '{}') AS parent_asset_ids,
+          COALESCE(derived.derived_asset_ids, '{}') AS derived_asset_ids
          FROM assets a
-         LEFT JOIN asset_tags at ON at.asset_id=a.id
-         LEFT JOIN tags t ON t.id=at.tag_id
-         LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
-         LEFT JOIN asset_relations d ON d.source_asset_id=a.id
+         LEFT JOIN (
+           SELECT at.asset_id, array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL) AS tags
+             FROM asset_tags at
+             JOIN tags t ON t.id=at.tag_id
+             JOIN assets ta ON ta.id=at.asset_id
+            WHERE ta.user_id=$1 AND ta.deleted_at IS NULL
+            GROUP BY at.asset_id
+         ) tags ON tags.asset_id=a.id
+         LEFT JOIN (
+           SELECT derived_asset_id AS asset_id, array_agg(DISTINCT source_asset_id) AS parent_asset_ids
+             FROM asset_relations ar
+             JOIN assets pa ON pa.id=ar.derived_asset_id
+            WHERE pa.user_id=$1 AND pa.deleted_at IS NULL
+            GROUP BY ar.derived_asset_id
+         ) parents ON parents.asset_id=a.id
+         LEFT JOIN (
+           SELECT source_asset_id AS asset_id, array_agg(DISTINCT derived_asset_id) AS derived_asset_ids
+             FROM asset_relations ar
+             JOIN assets da ON da.id=ar.source_asset_id
+            WHERE da.user_id=$1 AND da.deleted_at IS NULL
+            GROUP BY ar.source_asset_id
+         ) derived ON derived.asset_id=a.id
         WHERE a.user_id=$1 AND a.deleted_at IS NULL
-        GROUP BY a.id
         ORDER BY a.created_at DESC`,
       [req.user.id],
     );
@@ -1120,37 +1164,12 @@ app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
   try {
     const row = await assetQuery(req.params.id, req.user.id);
     if (!row) return res.status(404).json({ error: '素材不存在' });
-    const total = Number(row.size_bytes || 0);
-    if (!total) return res.status(404).json({ error: '素材文件大小无效' });
-    const range = req.headers.range;
-    let start = 0;
-    let end = Math.max(0, total - 1);
-    if (range) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match || (!match[1] && !match[2])) return res.status(416).set('Content-Range', `bytes */${total}`).end();
-      if (match[1]) start = Number(match[1]);
-      if (match[2]) end = Number(match[2]);
-      else end = Math.min(total - 1, start + 4 * 1024 * 1024 - 1);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= total || end < start) {
-        return res.status(416).set('Content-Range', `bytes */${total}`).end();
-      }
-      end = Math.min(end, total - 1);
-    }
-    const length = end - start + 1;
-    res.status(range ? 206 : 200);
-    res.set({
-      'Content-Type': row.content_type || 'video/mp4',
-      'Content-Length': String(length),
-      'Accept-Ranges': 'bytes',
-      'Content-Disposition': 'inline',
-      'Cache-Control': streamCacheControl,
-      ...(row.sha256 ? { ETag: `"${row.sha256}"` } : {}),
-      ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
-    });
-    const headers = range ? { Range: `bytes=${start}-${end}` } : {};
-    cos.getObject({ Bucket: bucket, Region: region, Key: row.object_key, Headers: headers, Output: res }, (error) => {
-      if (error && !res.headersSent) next(error);
-    });
+    if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
+
+    // 视频字节直接从 COS 返回，保留登录鉴权的首跳，同时让后续 Range 请求绕过
+    // Node/Express 中转，减少一次应用服务器和数据库/COS 之间的往返。
+    return res.redirect(307, stableSignedUrl(row.object_key));
+
   } catch (error) {
     next(error);
   }
@@ -1222,7 +1241,7 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     const originalFilename = decodeMultipartFilename(req.file.originalname);
     const name = safeName(String(req.body.name || path.basename(originalFilename, path.extname(originalFilename))));
     const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalFilename)}`;
-    await putObject(objectKey, tempPath, req.file.mimetype);
+    await putObject(objectKey, tempPath, req.file.mimetype, mediaCacheControl);
     const asset = await ingestAsset({
       userId: req.user.id,
       tempPath,
@@ -1264,7 +1283,7 @@ app.post('/api/assets/upload-ticket', requireUser, async (req, res, next) => {
         Method: 'PUT',
         Sign: true,
         Expires: 600,
-        Headers: { 'Content-Type': mimeType },
+        Headers: { 'Content-Type': mimeType, 'Cache-Control': mediaCacheControl },
       }, (error, data) => {
         if (error || !data?.Url) reject(error || new Error('生成上传地址失败'));
         else resolve(data.Url);
@@ -1335,7 +1354,7 @@ async function applyAssetFileReplacement({ userId, assetId, current, tempPath, o
   }
   let thumbKey = null;
   try {
-    const preview = await createAssetPreview(type, tempPath, objectKey, 'Replacement asset');
+    const preview = await createAssetPreview(type, tempPath, objectKey, 'Replacement asset', mimeType);
     thumbKey = preview.thumbKey;
     const durationSeconds = preview.durationSeconds;
     const sha256 = await hashFile(tempPath);
@@ -1372,7 +1391,7 @@ app.post('/api/assets/:id/file', requireUser, upload.single('file'), async (req,
     if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
     if (type !== current.type) return res.status(400).json({ error: `只能替换为同类型${current.type === 'video' ? '视频' : '图片'}文件` });
     uploadedKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(decodeMultipartFilename(req.file.originalname))}`;
-    await putObject(uploadedKey, tempPath, req.file.mimetype);
+    await putObject(uploadedKey, tempPath, req.file.mimetype, mediaCacheControl);
     const asset = await applyAssetFileReplacement({
       userId: req.user.id,
       assetId: req.params.id,
