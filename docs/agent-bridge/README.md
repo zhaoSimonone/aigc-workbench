@@ -2,6 +2,8 @@
 
 本目录把“高阶模型规划、低阶模型执行、再由高阶模型复核”从聊天复制粘贴改成共享文件协作。
 
+**强制交接规则：高阶模型每次回复都必须明确“现在发给 Zcode 的完整提示词”和“Zcode 完成后用户发回 Codex 的固定提示词”。不得只输出分析过程。完整协议见 [`HANDOFF_PROTOCOL.md`](./HANDOFF_PROTOCOL.md)。**
+
 ## 两个模型之间的最短流程
 
 ### 高阶模型（Codex）
@@ -14,9 +16,18 @@
    python3 scripts/agent_bridge.py set-state ready_for_zcode --task-id <taskId>
    ```
 
-3. 只需让 Zcode 执行一句：
+3. 回复用户时必须提供一个“现在发给 Zcode”的可复制代码块。推荐内容：
 
-   > 读取并执行 `docs/agent-bridge/current-task.md`；完成后把结构化结果写入 `docs/agent-bridge/current-result.md`，不要自行启动下一项任务。
+   ```text
+   请读取并执行 /Users/simon/Desktop/dev/code/aigc-workbench/docs/agent-bridge/current-task.md。
+   严格按任务文件执行：完成后将结构化结果写入 /Users/simon/Desktop/dev/code/aigc-workbench/docs/agent-bridge/current-result.md，不要自行启动下一项任务。
+   ```
+
+4. 同一条回复还必须告诉用户：Zcode 完成后只需回到 Codex 发送：
+
+   ```text
+   请读取并 Review /Users/simon/Desktop/dev/code/aigc-workbench/docs/agent-bridge/current-result.md。
+   ```
 
 ### 低阶模型（Zcode）
 
@@ -28,18 +39,18 @@
    ```
 
 3. 只执行任务文件允许的范围，遇到 stop condition 立即停止。
-4. 写 `current-result.md`，运行：
+5. 写 `current-result.md`，运行：
 
    ```bash
    python3 scripts/agent_bridge.py validate-result
    python3 scripts/agent_bridge.py set-state needs_review --task-id <taskId>
    ```
 
-5. 不得自行把 `needs_review` 改成 `approved`，也不得自行启动下一任务。
+6. 不得自行把 `needs_review` 改成 `approved`，也不得自行启动下一任务。
 
 ### 高阶模型复核
 
-高阶模型读取 `current-result.md`，必要时直接修改代码或生成下一份任务。任务完成且结果通过校验后可归档：
+高阶模型读取 `current-result.md`，必要时直接修改代码或生成下一份任务。回复用户时必须先给出 Review 结论，再给出“现在发给 Zcode”和“Zcode 完成后发回 Codex”两个明确动作。任务完成且结果通过校验后可归档：
 
 ```bash
 python3 scripts/agent_bridge.py archive

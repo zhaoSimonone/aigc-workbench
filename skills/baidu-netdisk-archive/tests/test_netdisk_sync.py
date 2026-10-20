@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
@@ -950,6 +951,320 @@ class BackwardCompatTests(unittest.TestCase):
         self.assertEqual(ns.assert_within_root("/AIGC/x"), "/AIGC/x")
         with self.assertRaises(ns.NetdiskError):
             ns.assert_within_root("/Pictures")
+
+
+class CreateContractTests(unittest.TestCase):
+    """回归保护：/api/create 请求体的字段集合、类型与 block_list 语义。
+
+    上一轮只读分析确认 errno=-7 与路径中的 Unicode 符号共变，但客户端契约本身
+    未被完整断言。这里把 create 的字段集合、字符串类型、block_list 完整性固定下来，
+    任何后续改动导致契约漂移都会立刻失败。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        # 10 MiB / 4 MiB 分片 = 3 个 digest，便于验证顺序与完整性
+        self.path = make_tmp_file(self.dir, "a.mp4", 10 * MIB)
+        self.size = os.path.getsize(self.path)
+        self.digests = ns.block_digests(self.path, 4 * MIB)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def make_ctx(self, host_mode="fixed"):
+        settings = {"chunk_size": 4 * MIB, "concurrency": 1, "inter_chunk_delay": 0.0,
+                    "upload_host_mode": host_mode, "profile": "safe"}
+        transport = mock.Mock()
+        transport.session.return_value = FakeSession()
+        return ns.BatchContext(FAKE_TOKEN, settings, transport)
+
+    def item(self, remote_path="/AIGC/a.mp4"):
+        return ns.PlanItem(self.path, "a.mp4", remote_path, self.size, "upload")
+
+    def run_upload(self, ctx, precreate_payload, captured, remote_path="/AIGC/a.mp4"):
+        """跑一次 upload_one_file，捕获 precreate/create 两个 body。"""
+        def fake_call(token, path, params=None, body=None, method="POST", session=None):
+            if path == "/api/precreate":
+                captured["precreate"] = dict(body)
+                return precreate_payload
+            if path == "/api/create":
+                captured["create"] = dict(body)
+                return {"errno": 0, "path": remote_path, "size": self.size}
+            return {"errno": 0}
+
+        def block_reply(url):
+            seq = int(dict(p.split("=", 1) for p in url.split("?", 1)[1].split("&"))["partseq"])
+            return FakeResponse(payload={"errno": 0, "md5": self.digests[seq]})
+
+        # FakeSession 的路由是消费型队列：每个分片各放一个可调用响应
+        session = FakeSession({"superfile2": [block_reply] * len(self.digests)})
+        ctx.transport.session.return_value = session
+        with mock.patch.object(ns, "call_retry", side_effect=fake_call):
+            result = ns.upload_one_file(ctx, self.item(remote_path))
+        return result
+
+    # ---- 字段集合与类型 ----
+
+    def test_create_body_field_set_is_exact(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        self.assertIsNotNone(captured.get("create"), "create 未被调用")
+        self.assertEqual(
+            set(captured["create"].keys()),
+            {"path", "size", "isdir", "uploadid", "block_list"},
+            "create 字段集合必须严格保持这 5 个",
+        )
+
+    def test_create_body_has_no_extra_or_missing_fields(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        body = captured["create"]
+        for required in ("path", "size", "isdir", "uploadid", "block_list"):
+            self.assertIn(required, body)
+        # 明确排除历史上可能出现的多余字段
+        for forbidden in ("autoinit", "ondup", "block_list_index"):
+            self.assertNotIn(forbidden, body, f"create 不应包含 {forbidden}")
+
+    def test_create_body_values_are_all_strings(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        for key, value in captured["create"].items():
+            self.assertIsInstance(value, str, f"字段 {key} 应为 str，实际 {type(value).__name__}")
+
+    def test_create_isdir_and_size_field_semantics(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        body = captured["create"]
+        self.assertEqual(body["isdir"], "0", "isdir 必须是字符串 '0'")
+        self.assertEqual(body["size"], str(self.size), "size 必须是字节数的十进制字符串")
+        self.assertEqual(body["size"], "10485760")
+        self.assertEqual(body["uploadid"], "UP-1", "create 必须沿用 precreate 返回的 uploadid")
+
+    def test_precreate_field_set_is_exact(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        self.assertEqual(
+            set(captured["precreate"].keys()),
+            {"path", "size", "isdir", "autoinit", "block_list"},
+            "precreate 字段集合必须严格保持这 5 个",
+        )
+        self.assertEqual(captured["precreate"]["autoinit"], "1")
+        self.assertNotIn("uploadid", captured["precreate"])
+
+    # ---- block_list 完整性与顺序 ----
+
+    def test_create_block_list_is_full_and_ordered(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        decoded = json.loads(captured["create"]["block_list"])
+        self.assertEqual(decoded, self.digests, "create 必须收到完整且有序的 digest 列表")
+        self.assertEqual(len(decoded), 3)
+        for digest in decoded:
+            self.assertRegex(digest, r"^[0-9a-f]{32}$")
+
+    def test_create_keeps_full_block_list_when_precreate_returns_partial(self):
+        """precreate 只返回缺失分片时，create 仍必须提交全量有序 digest。"""
+        captured = {}
+        payload = {"errno": 0, "uploadid": "UP-2", "block_list": [1]}
+        result = self.run_upload(self.make_ctx(), payload, captured)
+        self.assertEqual(result.status, "uploaded", result.detail)
+        self.assertEqual(result.metrics["chunksRequested"], 1, "只应上传缺失的那一片")
+        self.assertEqual(result.metrics["chunksUploaded"], 1)
+        decoded = json.loads(captured["create"]["block_list"])
+        self.assertEqual(decoded, self.digests, "即使只传了一片，create 仍须收到完整列表")
+        self.assertEqual(captured["precreate"]["block_list"], json.dumps(self.digests),
+                         "precreate 同样提交完整列表")
+
+    def test_create_block_list_unchanged_when_all_blocks_instant(self):
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-3", "return_1": 0}, captured)
+        decoded = json.loads(captured["create"]["block_list"])
+        self.assertEqual(decoded, self.digests, "秒传也不能丢失 block_list")
+
+    # ---- 编码往返 ----
+
+    def test_create_body_survives_urlencode_roundtrip(self):
+        """form-urlencode 编解码后 create 的每个字段值必须与编码前完全一致。"""
+        captured = {}
+        self.run_upload(self.make_ctx(), {"errno": 0, "uploadid": "UP-1"}, captured)
+        body = captured["create"]
+        raw = urllib.parse.urlencode(body)
+        restored = dict(urllib.parse.parse_qsl(raw, keep_blank_values=True))
+        for key, value in body.items():
+            self.assertEqual(restored[key], value, f"字段 {key} 经 urlencode 往返后发生变化")
+
+    def test_block_list_survives_nested_urlencode(self):
+        """block_list 是嵌在 form body 里的 JSON 字符串，需经二次解码还原。"""
+        digests = self.digests
+        raw = urllib.parse.urlencode({"block_list": json.dumps(digests)})
+        outer = dict(urllib.parse.parse_qsl(raw))
+        self.assertEqual(json.loads(outer["block_list"]), digests)
+
+
+SPECIAL_SEGMENTS = [
+    ("ascii", "plain_ascii_name.mp4"),
+    ("chinese", "中文文件名.mp4"),
+    ("hash", "name#tag#more.mp4"),
+    ("fullwidth", "全角标点：测试？。mp4"),
+    ("ascii_dot", "name.with.dots.mp4"),
+    ("mixed_dot", "片段.0.668s.mp4"),
+    ("emoji_simple", "\U0001F9E0emoji.mp4"),
+    ("emoji_vs16", "\U0001F3B5VS16.mp4"),
+    ("emoji_astral", "\U0001F342fallingleaf.mp4"),
+    ("symbol_bmp", "❄️snow.mp4"),
+    ("plus_at", "a+b@c.mp4"),
+    ("percent_like", "100%real.mp4"),
+]
+
+
+class UnicodePathTests(unittest.TestCase):
+    """回归保护：特殊字符路径在 path 构造与 urlencode 后的稳定性。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_collect_matches_exact_unicode_relative_path(self):
+        """collect 的 include 匹配必须对含 emoji/全角/#/ASCII 句点的路径精确生效。"""
+        for label, name in SPECIAL_SEGMENTS:
+            with self.subTest(label):
+                target = f"素材/第一批/{name}"
+                sub = os.path.join(self.dir, "素材", "第一批")
+                os.makedirs(sub, exist_ok=True)
+                make_tmp_file(sub, name, 1024)
+                files = ns.collect(self.dir, ["*.DS_Store"], [target])
+                rels = [rel for _, rel in files]
+                self.assertIn(target, rels, f"{label}: include 未精确匹配 {name!r}")
+                others = [r for r in rels if r != target]
+                self.assertEqual(others, [], f"{label}: 误匹配到其它文件 {others}")
+
+    def test_remote_path_survives_urlencode_roundtrip(self):
+        for label, name in SPECIAL_SEGMENTS:
+            with self.subTest(label):
+                remote = f"/AIGC/1013视频/素材/第一批/{name}"
+                raw = urllib.parse.urlencode({"path": remote})
+                restored = dict(urllib.parse.parse_qsl(raw))["path"]
+                self.assertEqual(restored, remote, f"{label}: path 经 urlencode 往返后被破坏")
+
+    def test_plan_builds_remote_path_with_unicode_preserved(self):
+        for label, name in SPECIAL_SEGMENTS:
+            with self.subTest(label):
+                sub = os.path.join(self.dir, "素材", "第一批")
+                os.makedirs(sub, exist_ok=True)
+                local = make_tmp_file(sub, name, 512)
+                rel = f"素材/第一批/{name}"
+                dest = "/AIGC"
+                remote_path = dest + "/" + rel.replace(os.sep, "/")
+                item = ns.PlanItem(local, rel, remote_path, os.path.getsize(local), "upload")
+                self.assertEqual(item.remote_path, remote_path)
+                self.assertTrue(item.remote_path.endswith(name),
+                                f"{label}: remote_path 末尾未保留原名")
+                self.assertIn("/AIGC/素材/第一批/", item.remote_path)
+
+    def test_path_is_not_normalised_or_truncated(self):
+        """路径中的连续句点、全角冒号、emoji 都必须原样保留，不做规范化。"""
+        remote = "/AIGC/930视频/素材/第三批/x.y.668s.png"
+        item = ns.PlanItem("/tmp/x", "x.y.668s.png", remote, 10, "upload")
+        self.assertEqual(item.remote_path.count("."), 3, "句点数量被改变")
+        self.assertIn("930视频", item.remote_path)
+
+    def test_variation_selector_and_emoji_distinct_but_stable(self):
+        for label, name in SPECIAL_SEGMENTS:
+            with self.subTest(label):
+                remote = f"/AIGC/{name}"
+                once = dict(urllib.parse.parse_qsl(urllib.parse.urlencode({"p": remote})))["p"]
+                twice = dict(urllib.parse.parse_qsl(urllib.parse.urlencode({"p": once})))["p"]
+                self.assertEqual(once, remote, f"{label}: 首次编码即失真")
+                self.assertEqual(twice, remote, f"{label}: 二次编码不稳定（幂等性）")
+
+    def test_block_upload_path_mode_unchanged_for_unicode_path(self):
+        """fixed/legacy 与 remote 两种分片 path 构造对含 emoji 的路径保持现有行为。"""
+        remote = "/AIGC/1013视频/素材/第一批/我决定穿这套.mp4"
+        captured = {}
+
+        def capture(url):
+            captured["url"] = url
+            return FakeResponse(payload={"errno": 0, "md5": "0" * 32})
+
+        session = FakeSession({"superfile2": capture})
+        nt.upload_block_with_retry(session, FAKE_TOKEN, "d.pcs.baidu.com", "legacy",
+                                  remote, "UPLOADID-1", 0, b"data", "0" * 32)
+        legacy_params = dict(p.split("=", 1) for p in captured["url"].split("?", 1)[1].split("&"))
+        self.assertEqual(
+            urllib.parse.unquote(legacy_params["path"]), "/apps/BaiduPCS/UPLOADID-1",
+            "legacy 模式必须使用 /apps/BaiduPCS/<uploadid> 临时路径",
+        )
+        self.assertEqual(urllib.parse.unquote(legacy_params["uploadid"]), "UPLOADID-1")
+
+        session2 = FakeSession({"superfile2": capture})
+        nt.upload_block_with_retry(session2, FAKE_TOKEN, "bjdd.pcs.baidu.com", "remote",
+                                   remote, "UPLOADID-2", 0, b"data", "0" * 32)
+        remote_params = dict(p.split("=", 1) for p in captured["url"].split("?", 1)[1].split("&"))
+        self.assertEqual(
+            urllib.parse.unquote(remote_params["path"]), remote,
+            "remote 模式必须使用真实远端路径",
+        )
+
+    def test_host_scheme_never_duplicated(self):
+        for host in ("https://bjdd-ct11.pcs.baidu.com", "d.pcs.baidu.com", "http://x.pcs.baidu.com"):
+            with self.subTest(host):
+                self.assertNotIn("https://https://", nt._host_only(host))
+
+    def test_special_chars_never_break_boundary_or_content(self):
+        """multipart boundary 与二进制分片内容必须保持完整、彼此可区分。"""
+        boundary = b"----B0UND"
+        payload = b"\x00\x01binary"
+        body = nt._build_block_body(boundary.decode(), 3, payload)
+        wire_boundary = b"--" + boundary
+        self.assertTrue(body.startswith(wire_boundary + b"\r\n"))
+        self.assertTrue(body.endswith(b"\r\n" + wire_boundary + b"--\r\n"))
+        self.assertIn(payload, body)
+        self.assertEqual(body.count(wire_boundary), 2)
+
+
+class OfflineGuardTests(unittest.TestCase):
+    """证明本测试套件不产生任何真实网络连接。"""
+
+    def test_upload_flow_makes_no_socket_connection(self):
+        import socket as _socket
+        d = tempfile.mkdtemp()
+        try:
+            path = make_tmp_file(d, "a.mp4", 5 * MIB)
+            digests = ns.block_digests(path, 4 * MIB)
+
+            def fake_call(token, api, params=None, body=None, method="POST", session=None):
+                if api == "/api/precreate":
+                    return {"errno": 0, "uploadid": "U"}
+                return {"errno": 0, "path": "/AIGC/a.mp4", "size": os.path.getsize(path)}
+
+            def block_reply(url):
+                seq = int(dict(p.split("=", 1) for p in url.split("?", 1)[1].split("&"))["partseq"])
+                return FakeResponse(payload={"errno": 0, "md5": digests[seq]})
+
+            block_route = [block_reply] * len(digests)
+
+            settings = {"chunk_size": 4 * MIB, "concurrency": 1, "inter_chunk_delay": 0.0,
+                        "upload_host_mode": "fixed", "profile": "safe"}
+            transport = mock.Mock()
+            transport.session.return_value = FakeSession({"superfile2": block_route})
+            ctx = ns.BatchContext(FAKE_TOKEN, settings, transport)
+            item = ns.PlanItem(path, "a.mp4", "/AIGC/a.mp4", os.path.getsize(path), "upload")
+
+            def boom(*_a, **_k):
+                raise AssertionError("测试期间不允许建立真实网络连接")
+
+            with mock.patch.object(_socket, "create_connection", side_effect=boom), \
+                 mock.patch.object(_socket.socket, "connect", side_effect=boom), \
+                 mock.patch.object(ns, "call_retry", side_effect=fake_call):
+                result = ns.upload_one_file(ctx, item)
+            self.assertEqual(result.status, "uploaded")
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,36 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from upload_assets import load_manifest  # noqa: E402
+from upload_assets import load_manifest, resolve_folder  # noqa: E402
+
+
+class GifRoutingTests(unittest.TestCase):
+    """GIF 默认落进 GIF 素材，但显式指定的文件夹永远优先。"""
+
+    def test_gif_without_explicit_folder_goes_to_overlay_library(self):
+        self.assertEqual(resolve_folder("", Path("/tmp/cover.gif")), "GIF 素材")
+        self.assertEqual(resolve_folder(None, Path("/tmp/COVER.GIF")), "GIF 素材")
+
+    def test_non_gif_without_explicit_folder_goes_to_inspiration(self):
+        self.assertEqual(resolve_folder("", Path("/tmp/photo.jpg")), "灵感收集")
+        self.assertEqual(resolve_folder("", Path("/tmp/clip.mp4")), "灵感收集")
+
+    def test_explicit_folder_overrides_gif_default(self):
+        self.assertEqual(resolve_folder("灵感收集", Path("/tmp/cover.gif")), "灵感收集")
+        self.assertEqual(resolve_folder("角色设定", Path("/tmp/cover.gif")), "角色设定")
+        self.assertEqual(resolve_folder("服装库", Path("/tmp/photo.jpg")), "服装库")
+
+    def test_overlay_library_is_an_allowed_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gif = Path(tmp) / "cover.gif"
+            gif.write_bytes(b"x")
+            manifest = Path(tmp) / "manifest.json"
+            manifest.write_text(json.dumps({
+                "items": [{"path": str(gif), "folder": "GIF 素材", "name": "心形贴纸"}]
+            }), encoding="utf-8")
+            plan, errors = load_manifest(str(manifest), [gif])
+            self.assertEqual(errors, {})
+            self.assertEqual(plan[os.path.abspath(str(gif))]["folder"], "GIF 素材")
 
 
 class ManifestTests(unittest.TestCase):

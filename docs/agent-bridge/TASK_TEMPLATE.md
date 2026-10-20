@@ -55,6 +55,12 @@
 
 ## Reporting
 
+低阶模型完成后只负责写结果文件，不负责决定下一项任务。高阶模型 Review 后必须按 [`HANDOFF_PROTOCOL.md`](./HANDOFF_PROTOCOL.md) 向用户明确给出：
+
+1. 现在是否需要把什么提示词发给 Zcode；
+2. Zcode 完成后用户要向 Codex 发送什么固定提示词；
+3. 当前是否允许真实写操作。
+
 结果写入 `docs/agent-bridge/current-result.md`，同时运行：
 
 ```bash

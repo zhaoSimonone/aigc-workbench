@@ -21,11 +21,22 @@ Use this skill for deterministic, user-directed video masking with an image or a
 ## Workflow
 
 1. **Confirm inputs and scope.** Use only the video and overlay files the user identified. Determine the start/end time and whether the overlay should be fixed, position-tracked, size-tracked, or both. If the user supplies a red-box screenshot, treat it as visual guidance, not as a machine-readable mask.
-2. **Inspect before editing.** Run `ffprobe` on the video and inspect the overlay dimensions, frame count, frame duration, loop behavior, and whether it already has alpha. Do not assume 30 fps, a 16:9 canvas, or a transparent GIF.
-3. **Choose the geometry explicitly.** For a fixed-size overlay, use one width and one height for the whole active range. For tracking, specify center-position keyframes as `(time, centerX, centerY)` in source-video pixels. Interpolate between keys and smooth only enough to avoid visible jumps. Keep the same geometry through the render unless the user explicitly asks for scaling.
-4. **Prepare the overlay.** For GIFs with a plain white background, use the supplied helper to remove only white pixels connected to the frame edge. Do not globally remove white, because that can erase white eyes, clothing, outlines, or highlights in the artwork. If the background is not separable safely, preserve it and report that limitation instead of guessing.
-5. **Render and composite.** Use `scripts/apply_overlay.py`. It creates temporary RGBA overlay frames, loops the animated source, positions each frame from the keyframe path, and composites the result with FFmpeg. The helper uses a temporary directory and cleans it after success or failure.
-6. **Verify.** Check output metadata with `ffprobe`; sample early, middle, motion, and final frames. Confirm the overlay stays within the requested region, remains the requested size, covers the intended content, and does not unexpectedly cover adjacent content. Report the exact output path and any unverified edge cases.
+2. **Locate the overlay.** If the user points at the workbench「GIF 素材」library instead of a local file, resolve it to a local path first:
+
+   ```bash
+   # list everything in GIF 素材
+   python3 scripts/fetch_overlay.py --list
+
+   # download one asset; prints the local .gif path
+   python3 scripts/fetch_overlay.py --asset-id <素材 ID>
+   ```
+
+   The helper reuses the workbench session (`~/.codex/aigc-shelf-session.json`) and caches files under `~/.config/aigc-workbench/gif/`. It never exposes the session token or COS credentials.
+3. **Inspect before editing.** Run `ffprobe` on the video and inspect the overlay dimensions, frame count, frame duration, loop behavior, and whether it already has alpha. Do not assume 30 fps, a 16:9 canvas, or a transparent GIF.
+4. **Choose the geometry explicitly.** For a fixed-size overlay, use one width and one height for the whole active range. For tracking, specify center-position keyframes as `(time, centerX, centerY)` in source-video pixels. Interpolate between keys and smooth only enough to avoid visible jumps. Keep the same geometry through the render unless the user explicitly asks for scaling.
+5. **Prepare the overlay.** For GIFs with a plain white background, use the supplied helper to remove only white pixels connected to the frame edge. Do not globally remove white, because that can erase white eyes, clothing, outlines, or highlights in the artwork. If the background is not separable safely, preserve it and report that limitation instead of guessing.
+6. **Render and composite.** Use `scripts/apply_overlay.py`. It creates temporary RGBA overlay frames, loops the animated source, positions each frame from the keyframe path, and composites the result with FFmpeg. The helper uses a temporary directory and cleans it after success or failure.
+7. **Verify.** Check output metadata with `ffprobe`; sample early, middle, motion, and final frames. Confirm the overlay stays within the requested region, remains the requested size, covers the intended content, and does not unexpectedly cover adjacent content. Report the exact output path and any unverified edge cases.
 
 ## Keyframe file
 
@@ -61,6 +72,13 @@ python3 /path/to/skills/video-overlay-censor/scripts/apply_overlay.py \
 ```
 
 For a fixed screen position, omit `--keyframes` and provide `--x` and `--y` as the overlay center. For proportional sizing, omit `--height`; otherwise pass both `--width` and `--height` to keep the exact dimensions constant. Use `--end` to stop the overlay before the video ends. Use `--ffmpeg` and `--ffprobe` when the binaries are not on `PATH`.
+
+The overlay path can be a local file or the output of `scripts/fetch_overlay.py`, which pulls a「GIF 素材」entry from the AIGC Shelf workbench into `~/.config/aigc-workbench/gif/`:
+
+```bash
+OVERLAY=$(python3 scripts/fetch_overlay.py --asset-id <素材 ID>)
+python3 scripts/apply_overlay.py --input input.mp4 --overlay "$OVERLAY" --output output.mp4 --start 0 --width 270 --height 190
+```
 
 ## Important boundaries
 

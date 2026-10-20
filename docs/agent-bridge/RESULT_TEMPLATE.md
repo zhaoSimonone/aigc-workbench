@@ -38,3 +38,14 @@
 ## Recommendation
 
 说明下一步建议。低阶模型不得自行批准下一项任务。
+
+## Handoff
+
+低阶模型不要填写下一项任务的执行提示词；由高阶模型 Review 后按 `HANDOFF_PROTOCOL.md` 生成。高阶模型必须在回复用户时明确：
+
+- 现在发给 Zcode 的完整提示词，或明确说明当前不要发送；
+- Zcode 完成后用户发回 Codex 的固定提示词：
+
+```text
+请读取并 Review /Users/simon/Desktop/dev/code/aigc-workbench/docs/agent-bridge/current-result.md。
+```

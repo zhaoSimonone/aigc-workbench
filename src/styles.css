@@ -1775,6 +1775,15 @@ button {
   width: 23px;
   height: 23px;
 }
+.asset-load-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 22px;
+}
+.asset-load-more .secondary-button {
+  min-width: 220px;
+  justify-content: center;
+}
 .empty-state {
   margin-top: 22px;
   min-height: 260px;

@@ -19,6 +19,7 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Film,
   FolderOpen,
   Grid2X2,
   Heart,
@@ -41,6 +42,7 @@ import {
   Shirt,
   Share2,
   Sparkles,
+  Sticker,
   Tag,
   Trash2,
   Upload,
@@ -62,6 +64,7 @@ const LIBRARY_FOLDERS = [
   "服装库",
   "发型库",
   "通用片段",
+  "GIF 素材",
   "项目资料",
 ];
 
@@ -74,6 +77,7 @@ const FOLDER_ROUTES = [
   ["outfits", "服装库"],
   ["hairstyles", "发型库"],
   ["clips", "通用片段"],
+  ["gif", "GIF 素材"],
   ["projects", "项目资料"],
   ["prompts", "提示词库"],
   ["accounts", "视频账号"],
@@ -122,6 +126,12 @@ function isCharacterAlbumAsset(asset) {
   return asset.folder === "发型库" && Boolean(asset.characterName);
 }
 
+// GIF 走图片通道上传（content_type=image/gif），但它有自己的展示语义：
+// 网格和详情里要保留动画，不能退化成一张静态图。
+function isGifAsset(asset) {
+  return asset?.type !== "video" && String(asset?.contentType || "") === "image/gif";
+}
+
 function albumCategory(asset) {
   if (asset.folder === "发型库") return asset.characterCategory || "发型";
   return asset.characterCategory || "";
@@ -149,6 +159,13 @@ const SPECIAL_LIBRARY_COPY = {
     emptyTitle: "还没有通用片段",
     emptyHint: "上传已经剪好、可复用的前段和换装片段。",
     emptyAction: "上传到通用片段",
+  },
+  "GIF 素材": {
+    icon: Sticker,
+    subtitle: "用于视频遮挡的 GIF 动画与贴纸素材，按遮挡对象和位置检索。",
+    emptyTitle: "还没有 GIF 素材",
+    emptyHint: "上传 GIF 动画，剪辑时可直接叠在画面上做遮挡。",
+    emptyAction: "上传到 GIF 素材",
   },
 };
 const VIDEO_ACCOUNT_PLATFORMS = ["抖音", "TikTok", "Instagram", "YouTube", "视频号", "小红书", "B站", "其他"];
@@ -398,6 +415,7 @@ function normaliseAsset(asset) {
     date: created && !Number.isNaN(created.valueOf()) ? formatAssetDate(created) : asset.date || "刚刚",
     createdAt: asset.date,
     tags: Array.isArray(asset.tags) ? asset.tags : [],
+    contentType: asset.contentType || asset.content_type || "",
     characterCategory: asset.characterCategory || "",
     musicTitle: asset.musicTitle || "",
     musicArtist: asset.musicArtist || "",
@@ -655,6 +673,7 @@ function Workspace({ user, onLogout }) {
   const [sortOpen, setSortOpen] = useState(false);
   const [sort, setSort] = useState("最近添加");
   const [view, setView] = useState("grid");
+  const [visibleAssetLimit, setVisibleAssetLimit] = useState(60);
   const fileInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -795,6 +814,11 @@ function Workspace({ user, onLogout }) {
         icon: Clapperboard,
       },
       {
+        label: "GIF 素材",
+        count: assets.filter((item) => item.folder === "GIF 素材").length,
+        icon: Sticker,
+      },
+      {
         label: "项目资料",
         count: assets.filter((item) => item.folder === "项目资料").length,
         icon: Archive,
@@ -842,6 +866,10 @@ function Workspace({ user, onLogout }) {
         : new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
     );
   }, [assets, activeFolder, activeCharacter, activeCharacterCategory, activeFilter, activeTag, query, sort]);
+  useEffect(() => {
+    setVisibleAssetLimit(60);
+  }, [activeFolder, activeCharacter, activeCharacterCategory, activeFilter, activeTag, query, sort, view]);
+  const displayedAssets = query.trim() ? filteredAssets : filteredAssets.slice(0, visibleAssetLimit);
   const tagOptions = useMemo(
     () =>
       [...new Set(assets.flatMap((asset) => asset.tags))].sort((a, b) =>
@@ -956,6 +984,7 @@ function Workspace({ user, onLogout }) {
       const xhr = new XMLHttpRequest();
       xhr.open("PUT", ticket.url);
       xhr.setRequestHeader("Content-Type", ticket.contentType);
+      xhr.setRequestHeader("Cache-Control", "private, max-age=86400, immutable");
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100), "upload");
       };
@@ -1860,19 +1889,32 @@ function Workspace({ user, onLogout }) {
                 <EmptyState query={query} onReset={() => { setQuery(""); setActiveFilter("全部"); }} />
               )
             ) : filteredAssets.length ? (
-              <div className={view === "grid" ? "asset-grid" : "asset-list"}>
-                {filteredAssets.map((asset) => (
-                  <AssetCard
-                    key={asset.id}
-                    asset={asset}
-                    onOpen={() => openAsset(asset)}
-                    onFavorite={() =>
-                      updateAsset(asset.id, { favorite: !asset.favorite })
-                    }
-                    list={view === "list"}
-                  />
-                ))}
-              </div>
+              <>
+                <div className={view === "grid" ? "asset-grid" : "asset-list"}>
+                  {displayedAssets.map((asset, index) => (
+                    <AssetCard
+                      key={asset.id}
+                      asset={asset}
+                      priority={index < 6}
+                      onOpen={() => openAsset(asset)}
+                      onFavorite={() =>
+                        updateAsset(asset.id, { favorite: !asset.favorite })
+                      }
+                      list={view === "list"}
+                    />
+                  ))}
+                </div>
+                {displayedAssets.length < filteredAssets.length && (
+                  <div className="asset-load-more">
+                    <button
+                      className="secondary-button"
+                      onClick={() => setVisibleAssetLimit((limit) => limit + 60)}
+                    >
+                      加载更多素材（还剩 {filteredAssets.length - displayedAssets.length} 条）
+                    </button>
+                  </div>
+                )}
+              </>
             ) : activeFolder === "角色设定" && activeCharacter ? (
               <div className="empty-state">
                 <div className="empty-icon"><FileImage size={22} /></div>
@@ -2685,12 +2727,12 @@ function formatAccountDate(value) {
   return date.toLocaleDateString("zh-CN", { year: "numeric", month: "numeric", day: "numeric" });
 }
 
-function LazyAssetImage({ src, alt, ...props }) {
+function LazyAssetImage({ src, alt, priority = false, ...props }) {
   const imageRef = useRef(null);
   const [shouldLoad, setShouldLoad] = useState(false);
 
   useEffect(() => {
-    if (!src) return undefined;
+    if (!src || priority) return undefined;
     const node = imageRef.current;
     if (!node) return undefined;
     if (!("IntersectionObserver" in window)) {
@@ -2708,22 +2750,22 @@ function LazyAssetImage({ src, alt, ...props }) {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [src]);
+  }, [src, priority]);
 
   return (
     <img
       ref={imageRef}
-      src={shouldLoad ? src : undefined}
+      src={priority || shouldLoad ? src : undefined}
       alt={alt}
-      loading="lazy"
+      loading={priority ? "eager" : "lazy"}
       decoding="async"
-      fetchPriority="low"
+      fetchPriority={priority ? "high" : "low"}
       {...props}
     />
   );
 }
 
-function AssetCard({ asset, onOpen, onFavorite, list }) {
+function AssetCard({ asset, onOpen, onFavorite, list, priority = false }) {
   return (
     <article
       className={`asset-card ${list ? "asset-card-list" : ""}`}
@@ -2732,14 +2774,14 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
       <div className={`asset-preview ${asset.color}`}>
         {asset.type === "video" ? (
           asset.thumb ? (
-            <LazyAssetImage src={asset.thumb} alt={`${asset.name} 视频封面`} />
+            <LazyAssetImage src={asset.thumb} alt={`${asset.name} 视频封面`} priority={priority} />
           ) : (
             <span className="asset-preview-placeholder">
               <FileVideo size={32} aria-label={`${asset.name} 暂无视频封面`} />
             </span>
           )
         ) : (
-          <LazyAssetImage src={asset.thumb || asset.src} alt={asset.name} />
+          <LazyAssetImage src={asset.thumb || asset.src} alt={asset.name} priority={priority} />
         )}
         {asset.type === "video" && (
           <div className="play-chip">
@@ -2752,6 +2794,11 @@ function AssetCard({ asset, onOpen, onFavorite, list }) {
               <>
                 <FileVideo size={12} />
                 视频
+              </>
+            ) : isGifAsset(asset) ? (
+              <>
+                <Film size={12} />
+                GIF
               </>
             ) : (
               <>
@@ -2923,7 +2970,7 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
           <div className="detail-title-row">
             <div>
               <p className="detail-type">
-                {asset.type === "video" ? "视频素材" : "图片素材"} <span />{" "}
+                {asset.type === "video" ? "视频素材" : isGifAsset(asset) ? "GIF 素材" : "图片素材"} <span />{" "}
                 {asset.source}
               </p>
               <h2>{asset.name}</h2>
