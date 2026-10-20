@@ -66,30 +66,42 @@ class Client:
             pass
 
     def _connect(self):
+        """返回 (连接, 代理请求头, 是否用绝对 URL)。
+
+        走代理时，连接类和请求路径都按「代理的协议」决定：代理是 http:// 时要用
+        明文连接和它握手，再把绝对 URL 交给它转发；按目标站点的协议选连接类会
+        变成对着明文代理做 TLS 握手，直接 WRONG_VERSION_NUMBER。
+        """
         proxy_url = os.environ.get("HTTPS_PROXY" if self.scheme == "https" else "HTTP_PROXY") or os.environ.get(
             "https_proxy" if self.scheme == "https" else "http_proxy"
         )
         if not proxy_url:
             connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-            return connection_class(self.host, self.port or (443 if self.scheme == "https" else 80), timeout=900), None
+            default_port = 443 if self.scheme == "https" else 80
+            return connection_class(self.host, self.port or default_port, timeout=900), None, False
         proxy = urlparse(proxy_url)
-        connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-        connection = connection_class(proxy.hostname, proxy.port or 80, timeout=900)
+        connection_class = http.client.HTTPSConnection if proxy.scheme == "https" else http.client.HTTPConnection
+        default_port = 443 if proxy.scheme == "https" else 80
+        connection = connection_class(proxy.hostname, proxy.port or default_port, timeout=900)
         headers = {}
         if proxy.username and proxy.password:
             import base64
             credentials = f"{proxy.username}:{proxy.password}"
             encoded = base64.b64encode(credentials.encode()).decode()
             headers["Proxy-Authorization"] = f"Basic {encoded}"
-        return connection, headers
+        return connection, headers, True
 
     def request(self, method, path, body=None, headers=None):
-        connection, proxy_headers = self._connect()
+        connection, proxy_headers, absolute = self._connect()
         request_headers = {"Accept": "application/json", **proxy_headers, **(headers or {})}
         if self.cookies:
             request_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
         request_path = path if path.startswith("/") else f"/{path}"
-        connection.request(method, f"{self.base_path}{request_path}", body=body, headers=request_headers)
+        if absolute:
+            target = f"{self.scheme}://{self.host}:{self.port or (443 if self.scheme == 'https' else 80)}{self.base_path}{request_path}"
+        else:
+            target = f"{self.base_path}{request_path}"
+        connection.request(method, target, body=body, headers=request_headers)
         response = connection.getresponse()
         payload = response.read()
         set_cookie = response.headers.get("Set-Cookie")
@@ -135,22 +147,19 @@ class Client:
         return url, (payload or {}).get("filename") or f"{asset_id}.gif"
 
     def download(self, url, destination):
-        parsed = urlparse(url)
-        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        connection = connection_class(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=900)
-        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-        connection.request("GET", target, headers={"Accept": "*/*"})
-        response = connection.getresponse()
-        if response.status >= 400:
-            connection.close()
-            raise RuntimeError(f"下载失败 HTTP {response.status}")
-        with destination.open("wb") as stream:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                stream.write(chunk)
-        connection.close()
+        # 用 urllib 而不是裸 http.client：它会自动读 HTTPS_PROXY/HTTP_PROXY
+        # 环境变量，下载 COS 直链时和请求工作台 API 走同一条网络路径。
+        import urllib.request
+        request = urllib.request.Request(url, headers={"Accept": "*/*", "User-Agent": "aigc-shelf-fetch-overlay/1.0"})
+        with urllib.request.urlopen(request, timeout=900) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"下载失败 HTTP {response.status}")
+            with destination.open("wb") as stream:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
         return destination.stat().st_size
 
 
