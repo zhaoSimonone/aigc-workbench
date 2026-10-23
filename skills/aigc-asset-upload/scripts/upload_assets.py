@@ -9,6 +9,8 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
+import shutil
 import sys
 from urllib.parse import urlparse
 import uuid
@@ -33,8 +35,102 @@ ALLOWED_FOLDERS = [
 GIF_FOLDER = "GIF 素材"
 DEFAULT_FOLDER = "灵感收集"
 
+# 待上传区可能混着各种扩展名，扫目录时按这套白名单认文件。
+MEDIA_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+    ".heic", ".heif", ".avif",
+    ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
+}
+
+# 文件头 → MIME。扩展名只作兜底：微信保存的图经常是 PNG 内容却叫 .jpg，
+# 按扩展名猜 MIME 会把 PNG 当 image/jpeg 上传，服务端按文件名存进 COS 后
+# 扩展名就永久错了，所以这里一律按真实文件头判断。
+MAGIC_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+
+MIME_TO_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/heic": ".heic",
+    "image/avif": ".avif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-msvideo": ".avi",
+    "video/x-matroska": ".mkv",
+}
+
+
+def sniff_mime_type(file_path):
+    """按文件头判断真实 MIME，读不出来时退回扩展名。
+
+    返回 (mime_type, guessed_by_extension)：第二个值表示是不是兜底猜的。
+    """
+    path = Path(file_path)
+    try:
+        with path.open("rb") as source:
+            header = source.read(32)
+    except OSError:
+        header = b""
+    for signature, mime_type in MAGIC_SIGNATURES:
+        if header.startswith(signature):
+            return mime_type, False
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image/webp", False
+    if header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+        return "video/x-msvideo", False
+    if header[4:8] == b"ftyp":
+        return ("video/quicktime" if header[8:12] == b"qt  " else "video/mp4"), False
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm", False
+    if header[4:8] == b"moov" or header[4:8] == b"mdat":
+        return "video/mp4", False
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream", True
+
+
+def extension_mismatch(file_path, mime_type):
+    """扩展名和真实格式对不上时返回说明，否则返回 None。"""
+    expected = MIME_TO_SUFFIX.get(mime_type)
+    if not expected:
+        return None
+    actual = Path(file_path).suffix.lower()
+    if not actual or actual == expected:
+        return None
+    if {actual, expected} == {".jpeg", ".jpg"}:
+        return None
+    return f"扩展名 {actual} 与真实格式 {mime_type}（应为 {expected}）不符"
+
+
+def is_media_file(file_path):
+    return Path(file_path).suffix.lower() in MEDIA_SUFFIXES
+
+
+def iter_media_files(directory):
+    """列出目录下本层的图片/视频，跳过子目录和隐藏文件。"""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    return [
+        item for item in sorted(directory.iterdir())
+        if item.is_file() and not item.name.startswith(".") and is_media_file(item)
+    ]
+
 
 def is_gif_path(file_path):
+    mime_type, _ = sniff_mime_type(file_path)
+    if mime_type == "image/gif":
+        return True
     return Path(file_path).suffix.lower() == ".gif"
 
 
@@ -213,7 +309,14 @@ class Client:
         return existing
 
     def upload(self, file_path, metadata):
-        mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        mime_type, by_extension = sniff_mime_type(file_path)
+        mismatch = extension_mismatch(file_path, mime_type)
+        if mismatch:
+            print(
+                f"提示：{file_path.name} 的{mismatch}，已按真实格式上传；"
+                f"建议先把本地文件改名，避免服务端 COS 里存成错扩展名",
+                file=sys.stderr,
+            )
         if not (mime_type.startswith("video/") or mime_type.startswith("image/")):
             raise ValueError(f"不支持的文件类型：{file_path.name}")
         if file_path.stat().st_size > MAX_FILE_BYTES:
@@ -244,7 +347,11 @@ class Client:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Upload local AIGC assets to AIGC Shelf")
-    parser.add_argument("files", nargs="+", type=Path, help="要上传的视频或图片路径")
+    parser.add_argument("files", nargs="*", type=Path, help="要上传的视频或图片路径")
+    parser.add_argument("--dir", action="append", default=[], dest="dirs", metavar="目录",
+                        help="扫描该目录下本层的图片/视频（跳过子目录，含 已上传/），可重复指定")
+    parser.add_argument("--archive", action="store_true",
+                        help="上传后执行归档：按服务端素材名改名并移入 <目录>/已上传/，然后复核")
     parser.add_argument("--name", default="", help="素材名称；多文件时自动追加原文件名")
     parser.add_argument("--name-map", default="", help="逐文件标题映射文件，每行 `路径|标题`，优先于 --name")
     parser.add_argument("--source", default="本地导入")
@@ -370,14 +477,159 @@ def file_sha256(file_path):
     return digest.hexdigest()
 
 
+def sanitize_filename(name):
+    """把服务端素材名安全地转成一个文件名片段。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", str(name or "")).strip().strip(".")
+    return cleaned or "未命名素材"
+
+
+def server_base_name(asset, suffix):
+    """服务端素材名去掉与本地重复的扩展名。
+
+    服务端的 name 字段存的是中文标题（不带扩展名），但历史数据里也可能
+    带着扩展名，两种都要能对上，所以这里做一次幂等处理。
+    """
+    name = sanitize_filename(asset.get("name") or "未命名素材")
+    if suffix and name.lower().endswith(suffix.lower()):
+        name = name[: -len(suffix)]
+    return name
+
+
+def trash_file(path):
+    """把重复文件移进系统回收站（可恢复），失败时退回永久删除。"""
+    path = Path(path)
+    trash = Path.home() / ".Trash"
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+        target = trash / path.name
+        index = 1
+        while target.exists():
+            target = trash / f"{path.stem}-{index}{path.suffix}"
+            index += 1
+        shutil.move(str(path), str(target))
+        return str(target)
+    except OSError:
+        os.remove(path)
+        return None
+
+
+def archive_directory(client, directory, archive_dir_name="已上传"):
+    """归档并复核：本地文件名对齐服务端素材名，移进归档目录。
+
+    - 待上传区里已在库的文件 → 改名成「服务端素材名 + 原扩展名」→ 移入归档目录
+    - 归档目录里名字对不上的 → 就地改名对齐
+    - 最后重算哈希复核一遍，确认「本地文件名 == 服务端素材名」
+    """
+    directory = Path(directory).expanduser()
+    archive_dir = directory / archive_dir_name
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    pending = iter_media_files(directory)
+    archived = iter_media_files(archive_dir)
+    digests = {}
+    for item in pending + archived:
+        try:
+            digests[item] = file_sha256(item)
+        except OSError as error:
+            print(f"归档跳过：{item.name} 无法计算哈希：{error}", file=sys.stderr)
+    try:
+        existing = client.find_existing(digests.values())
+    except Exception as error:
+        print(f"归档失败：去重检查出错 {error}", file=sys.stderr)
+        return 1
+
+    failures = 0
+    for item in pending:
+        digest = digests.get(item)
+        asset = existing.get(digest) if digest else None
+        if not asset:
+            print(f"归档跳过：{item.name} 在库里没有对应素材，未改名也未移动")
+            continue
+        suffix = item.suffix.lower()
+        target_name = server_base_name(asset, suffix) + suffix
+        target = archive_dir / target_name
+        if target.exists() and target != item:
+            try:
+                same = file_sha256(target) == digest
+            except OSError:
+                same = False
+            if same:
+                trashed = trash_file(item)
+                print(f"归档清理：{item.name} 与 已上传/{target_name} 字节相同，删掉命名不正确的那个"
+                      + (f"（已移入回收站 {trashed}）" if trashed else ""))
+                continue
+            failures += 1
+            print(f"归档冲突：{item.name} 与 已上传/{target_name} 内容不同，两个都保留", file=sys.stderr)
+            continue
+        try:
+            item.rename(target)
+            print(f"归档：{item.name} → 已上传/{target_name}（对齐服务端素材名「{asset.get('name')}」）")
+        except OSError as error:
+            failures += 1
+            print(f"归档失败：{item.name} → {target_name}：{error}", file=sys.stderr)
+
+    for item in iter_media_files(archive_dir):
+        digest = digests.get(item)
+        asset = existing.get(digest) if digest else None
+        if not asset:
+            continue
+        suffix = item.suffix.lower()
+        target_name = server_base_name(asset, suffix) + suffix
+        if item.name == target_name:
+            continue
+        try:
+            item.rename(item.with_name(target_name))
+            print(f"归档改名：已上传/{item.name} → {target_name}")
+        except OSError as error:
+            failures += 1
+            print(f"归档改名失败：{item.name} → {target_name}：{error}", file=sys.stderr)
+
+    verified = 0
+    for item in iter_media_files(archive_dir):
+        try:
+            digest = file_sha256(item)
+        except OSError as error:
+            failures += 1
+            print(f"复核失败：已上传/{item.name} 无法计算哈希：{error}", file=sys.stderr)
+            continue
+        asset = existing.get(digest)
+        if not asset:
+            failures += 1
+            print(f"复核不一致：已上传/{item.name} 按哈希在库里找不到对应素材", file=sys.stderr)
+            continue
+        expected = server_base_name(asset, item.suffix.lower())
+        if item.stem != expected:
+            failures += 1
+            print(f"复核不一致：已上传/{item.name} 应为「{expected}」", file=sys.stderr)
+            continue
+        verified += 1
+    print(f"复核：已上传/ 共 {len(iter_media_files(archive_dir))} 个文件，{verified} 个与服务端素材名一致")
+    return 1 if failures else 0
+
+
 def main():
     args = parse_args()
     files = []
+    seen_paths = set()
     for path in args.files:
         if not path.is_file():
             print(f"跳过：文件不存在 {path}", file=sys.stderr)
             continue
+        key = os.path.abspath(str(path))
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
         files.append(path)
+    for directory in args.dirs:
+        found = iter_media_files(directory)
+        if not found:
+            print(f"提示：{directory} 本层没有可上传的图片/视频")
+        for path in found:
+            key = os.path.abspath(str(path))
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            files.append(path)
     if not files:
         raise SystemExit("没有可上传的文件")
     name_map = load_name_map(args.name_map) if args.name_map else {}
@@ -447,6 +699,10 @@ def main():
         except Exception as error:
             failures += 1
             print(f"[{index}/{len(files)}] 失败：{file_path.name}：{error}", file=sys.stderr)
+    if args.archive:
+        for directory in args.dirs:
+            print(f"归档：{directory}")
+            failures += archive_directory(client, directory)
     return 1 if failures else 0
 
 

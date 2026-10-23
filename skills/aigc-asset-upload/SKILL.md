@@ -28,11 +28,15 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
    目录扫描约定：本机 `/Users/simon/Desktop/AIGC` 下的 `服装`、`通用片段`、`发型`、`遮挡` 是「待上传区」，用户持续往里放新素材；已上传的素材会归档到同级 `已上传/` 子目录。**只扫描目录本身的文件，跳过所有子目录（尤其是 `已上传/`）**，不要把归档文件重新上传一遍。
 
+   **扫目录用 `--dir <目录>`，不要写 `*.jpg` 这类扩展名 glob。** 微信保存的图里有 PNG 内容叫 `.jpg` 的，也有 JPEG 内容叫 `.png` 的，扩展名 glob 既可能漏掉文件，又可能在改名后彻底匹配不到任何东西。`--dir` 按媒体白名单收本层文件、跳过子目录和隐藏文件，跟扩展名无关。
+
+   **上传前本地文件的扩展名必须和真实格式一致。** 脚本按**文件头**判断 Content-Type，扩展名错标会告警，但服务端 COS 的对象名取自上传时的文件名，扩展名错了会永久留在对象名上，事后改名也改不掉。收到告警就先把本地文件改名再传。
+
    **每次扫描待上传区都要走完整的「查—传—归档」三步**，不能只把新文件传上去就算完：
 
    1. **查**：对目录里每个文件算 SHA-256，批量调 `POST /api/assets/check-hashes`，把命中的和未命中的分开。命中的直接拿到服务端素材名。
    2. **传**：只上传未命中的。命名、打标签照常执行。命中但**内容其实是同一段素材的重新编码**（哈希不同但画面一致）时，以库里已上传的那条为准，不要再传，用那条的服务端名。
-   3. **归档**：把两个目录里**所有**已在库的文件的本地文件名改成服务端素材名（保留原扩展名），再移动进 `已上传/`。已上传的也要改名——上一轮遗留的旧名同样要对齐，否则本地和远端对不上，无法用来比对。
+   3. **归档**：把两个目录里**所有**已在库的文件的本地文件名改成服务端素材名（保留原扩展名），再移动进 `已上传/`。已上传的也要改名——上一轮遗留的旧名同样要对齐，否则本地和远端对不上，无法用来比对。**加 `--archive` 让脚本自动完成归档并复核**，不要手写改名/移动命令。
    4. 归档后复核一遍：把 `已上传/` 里每个文件重新算哈希查一次服务端，确认「本地文件名 == 服务端名」，有对不上的当场修掉；发现内容字节完全相同的重复文件，删掉命名不正确的那个。
    5. 汇报时说清楚：新增上传了哪些、只是改名归档了哪些、清理了哪些重复。
 
@@ -90,7 +94,7 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
    {
      "items": [
        {
-         "path": "/Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg",
+         "path": "/Users/simon/Desktop/AIGC/服装/WechatIMG848.png",
          "folder": "服装库",
          "name": "淡紫针织露肩鱼尾裙",
          "tags": ["淡紫", "针织", "露肩", "长裙", "鱼尾"]
@@ -146,10 +150,10 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 整批同库时直接用 `--folder`：
 
 ```bash
-# 服装目录 → 服装库
+# 服装目录 → 服装库（扫目录本层，跳过 已上传/；--archive 归档并复核）
 python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
-  /Users/simon/Desktop/AIGC/服装/*.jpg \
-  --folder "服装库" --source "本地导入"
+  --dir /Users/simon/Desktop/AIGC/服装 \
+  --folder "服装库" --source "本地导入" --archive
 ```
 
 混合文件时只用 manifest，不要整批一个 folder：
@@ -157,12 +161,12 @@ python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/sc
 ```bash
 cat > /tmp/aigc-manifest.json <<'EOF'
 {"items":[
-  {"path":"/Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg","folder":"服装库","name":"淡紫针织露肩鱼尾裙","tags":["淡紫","针织","露肩","长裙","鱼尾"]},
+  {"path":"/Users/simon/Desktop/AIGC/服装/WechatIMG848.png","folder":"服装库","name":"淡紫针织露肩鱼尾裙","tags":["淡紫","针织","露肩","长裙","鱼尾"]},
   {"path":"/Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4","folder":"通用片段","name":"蓝色双麻花辫-黑色吊带裙","tags":["蓝色双麻花辫","黑色吊带裙","通用片段"]}
 ]}
 EOF
 python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
-  /Users/simon/Desktop/AIGC/服装/WechatIMG848.jpg \
+  /Users/simon/Desktop/AIGC/服装/WechatIMG848.png \
   /Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4 \
   --manifest /tmp/aigc-manifest.json
 ```
@@ -170,6 +174,8 @@ python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/sc
 `--folder` 可选值：`灵感收集`、`我的创作`、`角色设定`、`项目资料`、`服装库`、`发型库`、`通用片段`、`GIF 素材`。不传 `--folder` 时，GIF 自动进 `GIF 素材`，其余文件进 `灵感收集`。
 
 其它参数：`--source-url` 保存原视频/参考链接；`--used` 标记已使用；可重复传入 `--parent-asset-id` 关联原素材；目标为 `角色设定` 时用 `--character-name`（必需）和 `--character-category` 指定人物相册与分类。
+
+`--dir` 可重复指定；每个目录取**本层**的图片/视频（跳过 `已上传/` 等子目录和隐藏文件），与扩展名无关。`--archive` 只作用于 `--dir` 指定的目录：把已在库的文件改名成「服务端素材名 + 原扩展名」并移入 `<目录>/已上传/`，再重算哈希复核一遍。
 
 ## 安全与边界
 
