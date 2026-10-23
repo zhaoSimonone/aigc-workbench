@@ -286,12 +286,17 @@ async function createAssetPreview(type, filePath, objectKey, warningLabel = '', 
 }
 
 function parseTags(value) {
-  if (Array.isArray(value)) return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))].slice(0, 30);
+  if (Array.isArray(value)) {
+    // 数组元素也要按空格/逗号拆开：客户端可能把一整串标签塞进单个元素
+    // （例如 ["粉色长发 黑猫耳 白衬衫"]），不拆就会存成一个带空格的标签
+    const items = value.flatMap((item) => String(item).split(/[,，\s]+/));
+    return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, 30);
+  }
   try {
     const parsed = JSON.parse(value || '[]');
     if (Array.isArray(parsed)) return parseTags(parsed);
   } catch (_) {}
-  return String(value || '').split(/[,，\\s]+/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
+  return String(value || '').split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
 }
 
 function safeName(name) {
