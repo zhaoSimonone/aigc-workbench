@@ -225,8 +225,7 @@ class Client:
 
         if proxy_url:
             proxy_parsed = urlparse(proxy_url)
-            connection_class = http.client.HTTPSConnection if proxy_parsed.scheme == "https" else http.client.HTTPConnection
-            connection = connection_class(proxy_parsed.hostname, proxy_parsed.port or 80, timeout=900)
+            proxy_port = proxy_parsed.port or (443 if proxy_parsed.scheme == "https" else 80)
 
             # Set up proxy authentication if present
             proxy_headers = {}
@@ -236,8 +235,19 @@ class Client:
                 encoded = base64.b64encode(credentials.encode()).decode()
                 proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
 
-            # For HTTPS through proxy, use CONNECT tunnel
-            full_path = f"{self.scheme}://{self.host}:{self.port or (443 if self.scheme == 'https' else 80)}{self.base_path}{path}"
+            # 连接类必须按「目标站」的 scheme 选，而不是按代理的 scheme：
+            # 只有 HTTPSConnection 会在 CONNECT 隧道建好后再跟目标站做 TLS，
+            # HTTPConnection 即使 set_tunnel 成功，隧道里走的仍是明文 HTTP，
+            # 目标站会收到 400 The plain HTTP request was sent to HTTPS port。
+            if self.scheme == "https":
+                connection = http.client.HTTPSConnection(proxy_parsed.hostname, proxy_port, timeout=900)
+                connection.set_tunnel(self.host, self.port or 443, headers=proxy_headers)
+                # 认证信息已随 CONNECT 发出，不能再塞进隧道内的请求头
+                proxy_headers = {}
+            else:
+                connection = http.client.HTTPConnection(proxy_parsed.hostname, proxy_port, timeout=900)
+
+            full_path = f"{self.base_path}{path}"
         else:
             connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
             connection = connection_class(self.host, self.port, timeout=900)
