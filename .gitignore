@@ -1,15 +1,23 @@
 node_modules
 dist
+output/
 outputs/
 .env
 .env.*
 !.env.example
+# Private COS integration document containing access credentials
+/docs/COS接入复用提示词.md
 .DS_Store
 __pycache__/
 .idea/
 .myflicker/
+# Canvas asset cache written by the design tool, regenerated per session
+/.mavis/
 # Agent Bridge runtime state (templates and schemas under docs/agent-bridge remain tracked)
 docs/agent-bridge/current-task.md
 docs/agent-bridge/current-result.md
 docs/agent-bridge/state.json
 docs/agent-bridge/history/
+# Keep only the curated work logs; agent scratch state and settings stay local
+/.workbuddy/*
+!/.workbuddy/memory/
