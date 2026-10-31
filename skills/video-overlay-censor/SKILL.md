@@ -32,6 +32,8 @@ Use this skill for deterministic, user-directed video masking with an image or a
    ```
 
    The helper reuses the workbench session (`~/.codex/aigc-shelf-session.json`) and caches files under `~/.config/aigc-workbench/gif/`. It never exposes the session token or COS credentials.
+
+   If `HTTPS_PROXY` is set, the helper tunnels through it with `CONNECT` and still wraps the tunnel in TLS, so it works behind a proxy and needs no environment cleanup. A `400 The plain HTTP request was sent to HTTPS port` response means the proxy path regressed to sending a plaintext request to port 443 — check that the proxy branch picks `HTTPSConnection` + `set_tunnel()` by the **target** scheme, not the proxy's scheme.
 3. **Inspect before editing.** Run `ffprobe` on the video and inspect the overlay dimensions, frame count, frame duration, loop behavior, and whether it already has alpha. Do not assume 30 fps, a 16:9 canvas, or a transparent GIF.
 4. **Choose the geometry explicitly.** For a fixed-size overlay, use one width and one height for the whole active range. For tracking, specify center-position keyframes as `(time, centerX, centerY)` in source-video pixels. Interpolate between keys and smooth only enough to avoid visible jumps. Keep the same geometry through the render unless the user explicitly asks for scaling.
 5. **Prepare the overlay.** For GIFs with a plain white background, use the supplied helper to remove only white pixels connected to the frame edge. Do not globally remove white, because that can erase white eyes, clothing, outlines, or highlights in the artwork. If the background is not separable safely, preserve it and report that limitation instead of guessing.

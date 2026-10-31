@@ -68,9 +68,16 @@ class Client:
     def _connect(self):
         """返回 (连接, 代理请求头, 是否用绝对 URL)。
 
-        走代理时，连接类和请求路径都按「代理的协议」决定：代理是 http:// 时要用
-        明文连接和它握手，再把绝对 URL 交给它转发；按目标站点的协议选连接类会
-        变成对着明文代理做 TLS 握手，直接 WRONG_VERSION_NUMBER。
+        走代理时先按「代理的协议」跟代理建立连接，再按「目标站点的协议」决定
+        隧道里要不要 TLS：
+
+        - 目标是 https：必须 CONNECT 建隧道，且连接类必须是 HTTPSConnection，
+          它才会在隧道之上再跟目标站握手。用 HTTPConnection 虽然也会发 CONNECT，
+          但隧道里继续走明文，目标站会收到明文 HTTP 并回
+          `400 The plain HTTP request was sent to HTTPS port`，Cookie 也会明文外泄。
+        - 目标是 http：不需要隧道，直接把绝对 URL 交给代理转发。
+
+        注意不能只按代理的协议选连接类，也不能把 https 绝对 URL 明文发给代理。
         """
         proxy_url = os.environ.get("HTTPS_PROXY" if self.scheme == "https" else "HTTP_PROXY") or os.environ.get(
             "https_proxy" if self.scheme == "https" else "http_proxy"
@@ -80,20 +87,28 @@ class Client:
             default_port = 443 if self.scheme == "https" else 80
             return connection_class(self.host, self.port or default_port, timeout=900), None, False
         proxy = urlparse(proxy_url)
-        connection_class = http.client.HTTPSConnection if proxy.scheme == "https" else http.client.HTTPConnection
-        default_port = 443 if proxy.scheme == "https" else 80
-        connection = connection_class(proxy.hostname, proxy.port or default_port, timeout=900)
-        headers = {}
+        proxy_port = proxy.port or (443 if proxy.scheme == "https" else 80)
+        proxy_headers = {}
         if proxy.username and proxy.password:
             import base64
             credentials = f"{proxy.username}:{proxy.password}"
             encoded = base64.b64encode(credentials.encode()).decode()
-            headers["Proxy-Authorization"] = f"Basic {encoded}"
-        return connection, headers, True
+            proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
+        if self.scheme == "https":
+            # 连接类按目标站的协议选：HTTPSConnection 才会在隧道内做 TLS 握手
+            connection = http.client.HTTPSConnection(proxy.hostname, proxy_port, timeout=900)
+            connection.set_tunnel(self.host, self.port or 443, headers=proxy_headers)
+            # 认证信息已随 CONNECT 发出，不能再塞进隧道内的请求头
+            return connection, None, False
+        if proxy.scheme == "https":
+            connection = http.client.HTTPSConnection(proxy.hostname, proxy_port, timeout=900)
+        else:
+            connection = http.client.HTTPConnection(proxy.hostname, proxy_port, timeout=900)
+        return connection, proxy_headers, True
 
     def request(self, method, path, body=None, headers=None):
         connection, proxy_headers, absolute = self._connect()
-        request_headers = {"Accept": "application/json", **proxy_headers, **(headers or {})}
+        request_headers = {"Accept": "application/json", **(proxy_headers or {}), **(headers or {})}
         if self.cookies:
             request_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
         request_path = path if path.startswith("/") else f"/{path}"
