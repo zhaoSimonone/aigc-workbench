@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频链接采集"
+  short_description: "下载 Instagram 和 TikTok 高清视频并命名上传到灵感库"
+  default_prompt: "使用 $video-inspiration-import 下载这些视频链接，查看画面后命名并上传到灵感收集。"
