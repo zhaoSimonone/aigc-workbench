@@ -47,6 +47,11 @@ class WorkflowTests(unittest.TestCase):
             "sine=frequency=440:sample_rate=44100", "-t", "1", "-c:v", "libx264",
             "-pix_fmt", "yuv420p", "-c:a", "aac", str(cls.video),
         ])
+        cls.vp9 = Path(cls.fixture_dir.name) / "vp9.mp4"
+        workflow.run([
+            workflow.tool("ffmpeg"), "-v", "error", "-i", str(cls.video),
+            "-c:v", "libvpx-vp9", "-c:a", "copy", str(cls.vp9),
+        ])
 
     @classmethod
     def tearDownClass(cls):
@@ -107,6 +112,66 @@ class WorkflowTests(unittest.TestCase):
             again = workflow.prepare_one(URL, self.args)
         self.assertEqual(download.call_count, 1)
         self.assertEqual(item["sha256"], again["sha256"])
+
+    def test_vp9_download_keeps_source_and_delivers_h264(self):
+        with patch.object(self, "video", self.vp9):
+            item = self.prepare_item()
+        self.assertEqual(workflow.digest(item["sourcePath"]), workflow.digest(self.vp9))
+        self.assertEqual(item["sourceMedia"]["videoCodec"], "vp9")
+        self.assertTrue(workflow.compatible(item["media"]))
+        self.assertTrue(item["fullDecodeVerified"])
+        self.assertEqual(item["media"]["frameRate"], item["sourceMedia"]["frameRate"])
+        self.assertAlmostEqual(item["media"]["duration"], item["sourceMedia"]["duration"], places=2)
+
+    def test_compatible_download_is_not_reencoded(self):
+        item = self.prepare_item()
+        self.assertEqual(item["sha256"], workflow.digest(self.video))
+        self.assertNotIn("sourcePath", item)
+
+    def legacy_cache(self):
+        directory = self.root / "tiktok/123456"
+        directory.mkdir(parents=True)
+        path = directory / "media.mp4"
+        shutil.copyfile(self.vp9, path)
+        state = {"platform": "tiktok", "videoId": "123456", "sourceUrl": URL,
+                 "path": str(path), "sha256": workflow.digest(path), "media": workflow.probe(path)}
+        workflow.write_json(directory / "state.json", state)
+        return directory, state
+
+    def test_legacy_vp9_cache_migrates_offline_and_reuses_source_receipt(self):
+        directory, old = self.legacy_cache()
+        with patch.object(workflow, "download_ytdlp", side_effect=AssertionError("offline")):
+            item = workflow.prepare_one(URL, self.args)
+        self.assertTrue(workflow.compatible(item["media"]))
+        self.assertEqual(workflow.digest(old["path"]), old["sha256"])
+        item.update(name="测试视频", tags=["舞蹈"])
+        client = FakeClient()
+        client.assets[old["sha256"]] = {"id": "previous-vp9"}
+        result = workflow.upload_one(item, client)
+        self.assertEqual(result["status"], "existing")
+        self.assertEqual(result["asset"]["id"], "previous-vp9")
+        self.assertEqual(client.posts, 0)
+
+    def test_failed_cache_conversion_preserves_old_state(self):
+        directory, old = self.legacy_cache()
+        with patch.object(workflow, "delivery_copy", side_effect=RuntimeError("encoding failed")):
+            with self.assertRaisesRegex(RuntimeError, "encoding failed"):
+                workflow.prepare_one(URL, self.args)
+        self.assertEqual(workflow.read_json(directory / "state.json"), old)
+        self.assertEqual(workflow.digest(old["path"]), old["sha256"])
+
+    def test_decode_failure_blocks_upload_plan(self):
+        with patch.object(workflow, "download_ytdlp", side_effect=self.fake_download), \
+                patch.object(workflow, "full_decode", side_effect=RuntimeError("decode error")):
+            with self.assertRaisesRegex(RuntimeError, "decode error"):
+                workflow.prepare_one(URL, self.args)
+        self.assertFalse((self.root / "tiktok/123456/state.json").exists())
+
+    def test_hdr_is_not_silently_converted_to_sdr(self):
+        media = workflow.probe(self.vp9)
+        media["colorTransfer"] = "smpte2084"
+        with self.assertRaisesRegex(ValueError, "HDR"):
+            workflow.delivery_copy(self.vp9, media, self.root / "converted.mp4")
 
     def test_failed_quality_refresh_preserves_previous_download(self):
         item = self.prepare_item()

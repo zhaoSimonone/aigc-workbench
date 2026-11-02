@@ -33,7 +33,11 @@ description: Download Instagram Reel/post and TikTok video links in the highest 
      --report /Users/simon/Downloads/AIGC-Inspiration/example-batch.json
    ```
 
-   默认先 yt-dlp 匿名解析；失败且本机存在 ClipDock 独立浏览器档案时，用其已有登录态再解析一次；仍失败才调用 ClipDock 播放捕获。优先按分辨率、帧率、码率选择视频并合并音轨，无损重封装为 MP4；不限制 720p/1080p，不放大低清源文件，不为改成 H.264 主动降低画质。下载、ffprobe 和预览解码都成功后才进入上传清单。`--engine yt-dlp` 或 `--engine clipdock` 可单独指定。Instagram 多视频轮播不批量展开，要求用户指定其中的视频。
+   默认先 yt-dlp 匿名解析；失败且本机存在 ClipDock 独立浏览器档案时，用其已有登录态再解析一次；仍失败才调用 ClipDock 播放捕获。优先按分辨率、帧率、码率选择可用视频并合并音轨，不限制 720p/1080p，不放大低清源文件。`--engine yt-dlp` 或 `--engine clipdock` 可单独指定。Instagram 多视频轮播不批量展开，要求用户指定其中的视频。
+
+   **MP4 容器不代表 QuickTime 编码兼容。** 默认交付 H.264、yuv420p、AAC 的 MP4；已满足条件的文件直接保留，VP9 等 SDR 视频则保留下载原件，另生成 CRF 18 的 H.264 兼容副本，分辨率和时间戳保持不变，已有 AAC 音轨直接复制。转码有损且可能增大文件，不得称为无损或更高清。HDR 转 SDR 需要另外确定色调映射，脚本会停止，避免静默改色。原件记录在 `sourcePath/sourceSha256/sourceMedia`，清单的 `path/media` 指向交付副本。音视频完整解码、ffprobe 和预览均通过后才进入清单；完整解码不等于听感或音画同步已人工确认。
+
+   复用旧缓存时自动补做兼容性处理，无需重新下载；失败保留旧文件及状态。旧清单必须重新 prepare 后再上传。若原件已在库里，按原件哈希命中旧素材，避免兼容转码产生重复上传；这不会替换线上旧文件，若需要替换应另行处理。
 
 2. **命名前必须读取并执行同仓库 [aigc-asset-upload](../aigc-asset-upload/SKILL.md) 的内容识别、标题和标签规则，不能只复用它的上传接口。** 打开清单中每个 `preview` 拼图；需要看贴图/细节时打开同目录 `preview-1.jpg` 等，或补取原视频帧。
 
@@ -55,7 +59,18 @@ description: Download Instagram Reel/post and TikTok video links in the highest 
 
    上传复用同仓库 `aigc-asset-upload/scripts/upload_assets.py` 的 Client、登录会话和 SHA-256 去重接口；可用 `AIGC_UPLOAD_SCRIPT` 覆盖脚本位置。保存用户原链接到 `sourceUrl`、平台名到 `source`。服务端已存在相同文件时返回已有素材 ID，不再上传。未登录时停在本地下载成果，使用现有上传技能恢复会话后重试，不索要 Cookie 内容。
 
-4. 汇报每条链接的实际分辨率、是否含音轨、上传名称和素材 ID。`existing` 是命中已有素材，`failed` 是失败，不能混称新增成功。某条失败不影响其它下载成功项；清单的 `errors` 保留失败原因。上传结果按项持续写入 `--results`。
+4. 汇报每条链接的实际分辨率、视频编码、是否含音轨、是否生成转码副本、上传名称和素材 ID。分别说明下载原件与交付副本的大小，不能按 MB 大小判断清晰度，也不能将 FFmpeg 解码通过说成已在 QuickTime 实测。`existing` 是命中已有素材，`failed` 是失败，不能混称新增成功。某条失败不影响其它下载成功项；清单的 `errors` 保留失败原因。上传结果按项持续写入 `--results`。
+
+## 修复已有本地文件
+
+对已下载但 QuickTime 无法播放的 MP4，可用实际技能路径执行：
+
+```bash
+python3 <技能目录>/scripts/import_video.py repair \
+  --input "<原视频绝对路径>" --output "<新的兼容版绝对路径>.mp4"
+```
+
+此命令保留输入，不覆盖已有输出，不上传文件；执行完整解码并输出源文件与兼容副本的媒体信息。兼容副本不能恢复下载时已经丢失的细节。
 
 ## ClipDock 和重试
 
