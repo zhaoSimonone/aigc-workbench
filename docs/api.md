@@ -125,3 +125,35 @@ Comment 结构：`{id,assetId,content,author,createdAt,updatedAt}`。
 启动服务时执行 `server/schema.sql`，幂等新增 `character_candidates JSONB DEFAULT '[]'` 和 `media_metadata JSONB DEFAULT '{}'`。旧素材不自动重下载、不回填角色确认、不改标题标签。
 
 完整音视频解码与静音/音量分析由本地 `import_video.py verify` 生成结构化报告，prepare 把报告和哈希写入 state。服务端 mediaMetadata 只表示 ffprobe 参数，不能据此声称音频听感正常。需要持久化检查结论时，可先生成 note 的 diff，再经整理流程写入；不会塞入音乐识别字段。
+
+### 真实环境验收
+
+以下命令在仓库根目录执行，需要显式提供已授权写入的服务地址、独立的新输出目录、FFmpeg 路径。脚本自动创建随机命名的临时验收账号，不使用现有用户会话；依赖 Python 标准库和仓库内完整技能目录。输出目录含临时登录凭据，禁止提交到 Git。
+
+```bash
+python3 server/test/asset-workflow-live.py \
+  --api "$AIGC_SHELF_URL" \
+  --workdir "$ACCEPTANCE_DIR" \
+  --ffmpeg "$FFMPEG_BIN"
+```
+
+真实平台视频须先用导入技能 `prepare` 生成独立清单，并完成画面识别、标题、标签及角色依据填写。以下命令上传到上一步的临时账号，检查去重、下载字节、完整解码、整理与刷新；会更新该清单/state 并清理生成的预览，不能使用正式工作中正在操作的清单。FFmpeg/ffprobe 需可由导入技能发现。
+
+```bash
+python3 server/test/video-import-live.py \
+  --api "$AIGC_SHELF_URL" \
+  --workdir "$ACCEPTANCE_DIR" \
+  --manifest "$ACCEPTANCE_MANIFEST"
+node server/test/asset-browser-live.cjs \
+  "$AIGC_SHELF_URL" "$ACCEPTANCE_DIR" "$PLAYWRIGHT_MODULE_PATH"
+```
+
+浏览器验收需要 Chrome、Playwright 及其 WebKit，当前夹具约定为两条至少 5 秒的 1080×1920 示例视频，输出桌面与移动尺寸截图及回执。检查播放推进和拖动进度，不替代人工试听或手机实机测试。
+
+无论验收成功或失败，都保留 `receipt.json` 并清理该次创建的账号。把此回执复制到对应服务容器后，在容器中执行：
+
+```bash
+node scripts/cleanup-acceptance.js /tmp/acceptance-receipt.json --confirm
+```
+
+清理器先校验回执中每个 UUID 与数据库邮箱一致，且邮箱必须符合 `acceptance-<32位十六进制>@example.invalid`，再删除这些账号专属前缀的 COS 对象和账号。不能传业务账号或替换成全库清理。结束后删除临时凭据、测试容器与测试库，保留脱敏验收记录；2026-11-02 的实际结果见 [发布验收记录](deployment-20261102.md)。

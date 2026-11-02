@@ -107,7 +107,7 @@ Content-Type: application/json
 
 ## 素材整理与音乐元数据
 
-`skills/video-inspiration-import` 提供 Instagram/TikTok 链接到「灵感收集」的本地采集链路：优先用 yt-dlp 按分辨率、帧率和码率下载可用的高清版本，失败时复用 `/Users/simon/Desktop/dev/code/video-downloads` 的 ClipDock 捕获 API。脚本校验音视频、生成预览和上传清单，Agent 根据画面填写中文标题和标签后，复用 `aigc-asset-upload` 查重上传并保存原视频链接。重复链接复用已校验的本地下载，上传中断后可按哈希核对再继续。使用方式和登录态说明见该技能的 `SKILL.md`。
+`skills/video-inspiration-import` 提供 Instagram/TikTok 链接到「灵感收集」的本地采集链路：优先用 yt-dlp 按分辨率、帧率和码率下载可用的高清版本；ClipDock 是可选的登录态和捕获回退，不要求另一台电脑存在开发者的仓库路径。脚本校验音视频、生成预览和上传清单，Agent 根据画面填写中文标题和标签后，复用 `aigc-asset-upload` 查重上传并保存原视频链接。重复链接复用已校验的本地下载，上传中断后可按哈希核对再继续。使用方式和登录态说明见该技能的 `SKILL.md`，MiniMax 等运行时配置见 `skills/aigc-asset-upload/references/runtime.md`。
 
 仓库内的 `skills/aigc-asset-organize` skill 可按素材 ID 或文件夹读取素材，基于实际画面和音轨提出标题、标签、备注及音乐识别结果。它先输出逐字段 diff，只有用户明确确认后才写回；批量写回使用 `PATCH /api/assets/:id/organize`，请求体可包含 `name`、`tags`、`note`、`folder` 和 `musicTitle`、`musicArtist`、`musicSource`、`musicStatus`、`musicConfidence`、`musicEvidence`。音乐无法可靠识别时应记录待确认状态，不要猜测曲名。
 
