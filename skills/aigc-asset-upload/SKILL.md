@@ -94,13 +94,13 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
    确认角色后用 `作品名-角色名-内容类型-关键服装` 命名，标签必须包含作品名和角色名，其余从类型和可见造型选取，总数不超过 5。纯舞蹈保留「舞蹈」，不写「换装」；只有实际出现贴图才写「贴图版」。例如 `海贼王-汉库克-舞蹈-红色印花开衩裙披风`，标签 `海贼王、汉库克、角色扮演、舞蹈、红色印花裙`。用户指定的目标库保持不变。
 
-   **作品名和角色名必须沿用库内既有写法。** 上传前用 `GET /api/assets` 查同 IP 的现成条目，照抄它的作品名和角色名，不要另起一种写法。发现同一 IP 在库里并存两套写法时（例如「不死者之王」和 `Overlord`），**先问用户统一到哪一种**，再一次性把相关条目的 `name` 和 `tags` 全部刷成同一种，改完复查旧写法残留为 0；不要让两套写法长期并存。角色名同理，官方译名和民间译名并存时用用户指定的那个（例：OVERLORD 的夏塔露统一写 `夏提雅`）。已确认的映射：OVERLORD → 作品名 `Overlord`、角色 `夏提雅` / `雅儿贝德`；Re:Zero → `Re零` / `蕾姆`（蓝发）与 `拉姆`（紫发）；海贼王 → `海贼王` / `波妮`（汉库克）。
+   **同一作品与同一角色优先沿用库内已核实的写法。** 上传前用 `GET /api/assets` 的 `q` 或角色过滤查询现成条目，避免另起一种译名；已有名称与用户纠正或官方角色资料冲突时，不能照抄错误。发现同一 IP 并存两套译名时（例如「不死者之王」和 `Overlord`），本次新素材沿用已确认写法；历史条目统一命名另走整理流程，展示 diff 后按用户授权处理，不因本次上传顺带修改全库。已确认的命名约定：OVERLORD → 作品名 `Overlord`、角色 `夏提雅` / `雅儿贝德`；Re:Zero → `Re零` / `蕾姆` / `拉姆`；海贼王 → `海贼王` / `汉库克`。**波妮与汉库克是不同角色，禁止互作别名**；作品和角色须结合画面逐项核实。
 
    **带动漫角色贴图的成片**优先用 `动漫名-角色名-贴图版-换装-换装两端-场景` 命名：动漫名和 cos 角色名放在最前面便于按 IP 检索，后面照样保留这条片子自己的服装描述；「换装两端」写清楚换装前后的两套造型（三套以上就写「A B C 三套换装」，别只列头尾两套），同一批里有多版时在末尾追加区分词（`-主版`、`-主交付`、`-无贴图`）。例：`五等分的花嫁-中野二乃-贴图版-换装`、`鬼灭之刃-竈门祢豆子-贴图版-换装-玫红裹胸换藏蓝金扣制服`、`Fate-远坂凛-贴图版-换装-牛油果绿抹胸换酒红高领黑短裙-主版`。
 
    **「换装」是类型标记，必须保留**，用来和纯舞蹈区分开——哪怕后面已经写成「A 换 B」也不能省。非 IP 的成片同理：换装片在标题最前面加 `换装-`，舞蹈/实拍/自拍片则不加或改成对应的类型词。
 
-   **标题长度上限 32 字，目标 24–30 字**（服务端会静默截断到 180 字，不会报错，但网格视图里超过 32 字就会挤成多行）。压缩规则：
+   **标题长度上限 32 字，目标 24–30 字**。技能发送 `curated-v1` 策略头，超长标题返回 400 与字段错误，不会静默截断；旧网页草稿接口仍保持兼容。压缩规则：
 
    - 换装两端各压到 **3–5 字**，只留能区分两套造型的特征词（颜色 + 品类即可），删掉「制服」「紧身」这类修饰和「贝壳」「网格」这类细节，除非它本身就是辨识点。
    - **场景词默认不写**，只有同一 IP 或同一系列有多版需要区分时才加（例：`-主版`/`-主交付` 之外的 `-手办柜前`/`-室内镜前`）。
@@ -170,7 +170,7 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
 **1. 查重只用 `POST /api/assets/check-hashes`，不要拉全库找素材。** 把待处理文件的哈希一次性传进去，实测 18 个哈希一批 0.01s。绝不要用 `GET /api/assets` 去库里翻某条素材在不在。
 
-**2. 全库索引只拉一次并落盘复用。** `GET /api/assets?limit=5000` 实测 9–27s、响应 2.1MB（含 1032 条带签名缩略图 URL 的完整 JSON），而且 `search` 参数不生效，传了仍返回全量。需要全库时拉一次存到本地文件，后续在本地过滤，不再重复请求。
+**2. 优先服务端过滤和单条回读。** `GET /api/assets?q=关键词&folder=灵感收集&limit=200&offset=0` 返回 `assets/total/hasMore`；也支持 `search` 别名、角色与时长过滤。单条回读用 `GET /api/assets/:id`。确需全库时用共享客户端 `list_assets()` 自动分页并在本批次复用，不把 `limit=5000` 的单页当全库（服务端单页上限 200）。
 
 **3. 一次拼图看多个候选。** 比对多个素材时用 `ffmpeg` 的 `hstack`/`vstack` 拼成 9 宫格或 16 宫格，**一次 Read 覆盖**，不要一张张读。抽帧本身很快（单帧 0.1s），成本在每张图一次模型往返。
 
@@ -184,15 +184,15 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
 脚本默认使用生产地址 `https://aigc.chatcanvas.online`，可用 `AIGC_SHELF_URL` 或 `--api` 覆盖。
 
-脚本会自动读取环境变量 `HTTPS_PROXY`/`https_proxy`（以及 http 目标时的 `HTTP_PROXY`），并走 CONNECT 隧道转发，**不需要手动清代理变量**。早期版本把 https 的绝对 URL 直接发给代理、隧道里不做 TLS，会被目标站拒绝成 `400 The plain HTTP request was sent to HTTPS port`，同时明文外泄 Cookie；已修。若再次出现该 400，先确认这里的连接类是按目标站 scheme 选的 `HTTPSConnection`。
+脚本使用共享标准库 HTTP 客户端，遵循 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`（及小写形式），**不需要手动清代理变量**。HTTPS 通过 CONNECT 后校验 TLS；下载会跟随重定向，跨域不会发送素材库 Cookie。会话、证书和依赖配置见 [跨 Agent 配置](references/runtime.md)。
 
-整批同库时直接用 `--folder`：
+命令中的 `/path/to/skills` 替换为当前 Agent 的技能目录。整批同库时用 `--folder`，仍须提供逐文件命名和 3–5 个标签：
 
 ```bash
 # 服装目录 → 服装库（扫目录本层，跳过 已上传/；--archive 归档并复核）
-python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
+python3 /path/to/skills/aigc-asset-upload/scripts/upload_assets.py \
   --dir /Users/simon/Desktop/AIGC/服装 \
-  --folder "服装库" --source "本地导入" --archive
+  --manifest /tmp/aigc-manifest.json --folder "服装库" --source "本地导入" --archive
 ```
 
 混合文件时只用 manifest，不要整批一个 folder：
@@ -204,7 +204,7 @@ cat > /tmp/aigc-manifest.json <<'EOF'
   {"path":"/Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4","folder":"通用片段","name":"蓝色双麻花辫-黑色吊带裙","tags":["蓝色双麻花辫","黑色吊带裙","通用片段"]}
 ]}
 EOF
-python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/scripts/upload_assets.py \
+python3 /path/to/skills/aigc-asset-upload/scripts/upload_assets.py \
   /Users/simon/Desktop/AIGC/服装/WechatIMG848.png \
   /Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4 \
   --manifest /tmp/aigc-manifest.json
