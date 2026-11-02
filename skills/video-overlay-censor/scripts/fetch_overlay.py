@@ -22,10 +22,14 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+upload_script = Path(os.environ.get("AIGC_UPLOAD_SCRIPT") or
+                     Path(__file__).resolve().parents[2] / "aigc-asset-upload/scripts/upload_assets.py").expanduser()
+sys.path.insert(0, str(upload_script.parent))
+from shelf_client import Client as ShelfClient, default_cookie_file, state_dir
 
 DEFAULT_API = "https://aigc.chatcanvas.online"
-DEFAULT_COOKIE_FILE = Path.home() / ".codex" / "aigc-shelf-session.json"
-DEFAULT_CACHE_DIR = Path.home() / ".config" / "aigc-workbench" / "gif"
+DEFAULT_COOKIE_FILE = default_cookie_file()
+DEFAULT_CACHE_DIR = state_dir() / "gif"
 OVERLAY_FOLDER = "GIF 素材"
 
 
@@ -36,122 +40,7 @@ def parse_json(payload):
         return {"raw": payload[:500].decode("utf-8", "replace")}
 
 
-class Client:
-    """Same session handling as the other AIGC Shelf skills: cookie file + login fallback."""
-
-    def __init__(self, base_url, cookie_file):
-        parsed = urlparse(base_url.rstrip("/"))
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise ValueError("AIGC_SHELF_URL 必须是 HTTP(S) 地址")
-        self.scheme = parsed.scheme
-        self.host = parsed.hostname
-        self.port = parsed.port
-        self.base_path = parsed.path.rstrip("/")
-        self.cookie_file = Path(cookie_file).expanduser()
-        self.cookies = self._load_cookies()
-
-    def _load_cookies(self):
-        try:
-            data = json.loads(self.cookie_file.read_text())
-            return {str(k): str(v) for k, v in data.items()}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_cookies(self):
-        self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cookie_file.write_text(json.dumps(self.cookies))
-        try:
-            self.cookie_file.chmod(0o600)
-        except OSError:
-            pass
-
-    def _connect(self):
-        """返回 (连接, 代理请求头, 是否用绝对 URL)。
-
-        走代理时先按「代理的协议」跟代理建立连接，再按「目标站点的协议」决定
-        隧道里要不要 TLS：
-
-        - 目标是 https：必须 CONNECT 建隧道，且连接类必须是 HTTPSConnection，
-          它才会在隧道之上再跟目标站握手。用 HTTPConnection 虽然也会发 CONNECT，
-          但隧道里继续走明文，目标站会收到明文 HTTP 并回
-          `400 The plain HTTP request was sent to HTTPS port`，Cookie 也会明文外泄。
-        - 目标是 http：不需要隧道，直接把绝对 URL 交给代理转发。
-
-        注意不能只按代理的协议选连接类，也不能把 https 绝对 URL 明文发给代理。
-        """
-        proxy_url = os.environ.get("HTTPS_PROXY" if self.scheme == "https" else "HTTP_PROXY") or os.environ.get(
-            "https_proxy" if self.scheme == "https" else "http_proxy"
-        )
-        if not proxy_url:
-            connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-            default_port = 443 if self.scheme == "https" else 80
-            return connection_class(self.host, self.port or default_port, timeout=900), None, False
-        proxy = urlparse(proxy_url)
-        proxy_port = proxy.port or (443 if proxy.scheme == "https" else 80)
-        proxy_headers = {}
-        if proxy.username and proxy.password:
-            import base64
-            credentials = f"{proxy.username}:{proxy.password}"
-            encoded = base64.b64encode(credentials.encode()).decode()
-            proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
-        if self.scheme == "https":
-            # 连接类按目标站的协议选：HTTPSConnection 才会在隧道内做 TLS 握手
-            connection = http.client.HTTPSConnection(proxy.hostname, proxy_port, timeout=900)
-            connection.set_tunnel(self.host, self.port or 443, headers=proxy_headers)
-            # 认证信息已随 CONNECT 发出，不能再塞进隧道内的请求头
-            return connection, None, False
-        if proxy.scheme == "https":
-            connection = http.client.HTTPSConnection(proxy.hostname, proxy_port, timeout=900)
-        else:
-            connection = http.client.HTTPConnection(proxy.hostname, proxy_port, timeout=900)
-        return connection, proxy_headers, True
-
-    def request(self, method, path, body=None, headers=None):
-        connection, proxy_headers, absolute = self._connect()
-        request_headers = {"Accept": "application/json", **(proxy_headers or {}), **(headers or {})}
-        if self.cookies:
-            request_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-        request_path = path if path.startswith("/") else f"/{path}"
-        if absolute:
-            target = f"{self.scheme}://{self.host}:{self.port or (443 if self.scheme == 'https' else 80)}{self.base_path}{request_path}"
-        else:
-            target = f"{self.base_path}{request_path}"
-        connection.request(method, target, body=body, headers=request_headers)
-        response = connection.getresponse()
-        payload = response.read()
-        set_cookie = response.headers.get("Set-Cookie")
-        if set_cookie:
-            pair = set_cookie.split(";", 1)[0]
-            if "=" in pair:
-                name, value = pair.split("=", 1)
-                if value:
-                    self.cookies[name] = value
-                else:
-                    self.cookies.pop(name, None)
-            self._save_cookies()
-        connection.close()
-        return response.status, parse_json(payload)
-
-    def ensure_login(self):
-        status, payload = self.request("GET", "/api/auth/me")
-        if status == 200:
-            return (payload or {}).get("user", {})
-        email = os.environ.get("AIGC_SHELF_EMAIL") or input("AIGC Shelf 登录邮箱: ").strip()
-        password = os.environ.get("AIGC_SHELF_PASSWORD") or getpass.getpass("AIGC Shelf 登录密码: ")
-        body = json.dumps({"email": email, "password": password}).encode()
-        status, payload = self.request("POST", "/api/auth/login", body, {
-            "Content-Type": "application/json", "Content-Length": str(len(body)),
-        })
-        if status != 200:
-            raise RuntimeError(f"登录失败 (HTTP {status}): {(payload or {}).get('error', '未知错误')}")
-        return (payload or {}).get("user", {})
-
-    def list_assets(self):
-        status, payload = self.request("GET", "/api/assets")
-        if status != 200:
-            raise RuntimeError((payload or {}).get("error", f"读取素材失败 HTTP {status}"))
-        return (payload or {}).get("assets", [])
-
+class Client(ShelfClient):
     def download_url(self, asset_id):
         status, payload = self.request("GET", f"/api/assets/{asset_id}/download-url")
         if status != 200:
@@ -161,21 +50,6 @@ class Client:
             raise RuntimeError("服务端没有返回下载地址")
         return url, (payload or {}).get("filename") or f"{asset_id}.gif"
 
-    def download(self, url, destination):
-        # 用 urllib 而不是裸 http.client：它会自动读 HTTPS_PROXY/HTTP_PROXY
-        # 环境变量，下载 COS 直链时和请求工作台 API 走同一条网络路径。
-        import urllib.request
-        request = urllib.request.Request(url, headers={"Accept": "*/*", "User-Agent": "aigc-shelf-fetch-overlay/1.0"})
-        with urllib.request.urlopen(request, timeout=900) as response:
-            if response.status >= 400:
-                raise RuntimeError(f"下载失败 HTTP {response.status}")
-            with destination.open("wb") as stream:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    stream.write(chunk)
-        return destination.stat().st_size
 
 
 def safe_filename(name, fallback):
@@ -209,7 +83,7 @@ def main():
         raise SystemExit("需要 --list、--asset-id 或 --name 之一")
     client = Client(args.api, args.cookie_file)
     user = client.ensure_login()
-    assets = client.list_assets()
+    assets = [client.get_asset(args.asset_id)] if args.asset_id else client.list_assets(folder=OVERLAY_FOLDER)
 
     if args.list:
         overlays = [asset for asset in assets if asset.get("folder") == OVERLAY_FOLDER]

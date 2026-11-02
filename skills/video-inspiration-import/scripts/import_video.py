@@ -2,7 +2,7 @@
 """Download social videos, prepare visual review, and import through AIGC Shelf."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import importlib.util
@@ -66,10 +66,21 @@ def log(message):
 
 def tool(name):
     override = os.environ.get(name.upper().replace("-", "_") + "_PATH")
+    runtime = [Path(os.environ[key]).expanduser() for key in
+               ("MINIMAX_DATA_DIR", "MINIMAX_HOME", "CODEX_HOME") if os.environ.get(key)]
+    runtime += [HOME / ".minimax", HOME / ".codex"]
+    state = Path(os.environ.get("AIGC_WORKBENCH_STATE_DIR") or
+                 str(Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser() / "aigc-workbench")).expanduser()
+    directories = [state / "venv/bin", state / "bin"]
+    data_dir = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser() / "aigc-workbench"
+    directories += [data_dir / "venv/bin", data_dir / "bin"]
+    if os.environ.get("AIGC_WORKBENCH_BIN_DIR"):
+        directories.insert(0, Path(os.environ["AIGC_WORKBENCH_BIN_DIR"]).expanduser())
+    directories += [root / suffix for root in runtime for suffix in
+                    ("tools", "tools/bin", "bin", "video-inspiration-venv/bin")]
     candidates = [
         override, shutil.which(name),
-        str(HOME / ".codex" / "video-inspiration-venv" / "bin" / name),
-        str(HOME / ".codex" / "bin" / name),
+        *(str(directory / name) for directory in directories),
         f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}",
     ]
     for candidate in candidates:
@@ -146,6 +157,9 @@ def probe(path):
         "frameRate": video.get("avg_frame_rate"),
         "videoBitRate": video.get("bit_rate"),
         "audioCodecs": [s.get("codec_name") for s in data["streams"] if s.get("codec_type") == "audio"],
+        "audioStreams": [{key: s.get(key) for key in
+                          ("index", "codec_name", "sample_rate", "channels", "channel_layout", "bit_rate")}
+                         for s in data["streams"] if s.get("codec_type") == "audio"],
         "bytes": Path(path).stat().st_size,
     }
 
@@ -161,6 +175,53 @@ def full_decode(path):
         "-err_detect", "explode", "-i", str(path),
         "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-",
     ], 1800)
+
+
+def verify_media(path):
+    """Technical checks cannot establish perceptual quality or lip sync."""
+    report = {"path": str(path), "errors": [], "warnings": [], "audio": []}
+    try:
+        report["media"] = media = probe(path)
+        full_decode(path)
+        report["decode"] = {"passed": True, "errorCount": 0}
+        if not media["audioStreams"]:
+            report["warnings"].append("No audio track; compare with the original")
+        for stream in media["audioStreams"]:
+            result = subprocess.run([
+                tool("ffmpeg"), "-hide_banner", "-nostats", "-i", str(path),
+                "-map", f"0:{stream['index']}", "-vn",
+                "-af", "volumedetect,silencedetect=noise=-40dB:d=0.5", "-f", "null", "-",
+            ], capture_output=True, text=True, timeout=1800)
+            if result.returncode:
+                raise RuntimeError(safe_error(result.stderr))
+            def volume(label):
+                match = re.search(rf"{label}_volume:\s*([-\w.]+) dB", result.stderr)
+                return match[1] if match else None
+            starts = [float(value) for value in re.findall(r"silence_start:\s*([\d.]+)", result.stderr)]
+            ends = [float(value) for value in re.findall(r"silence_end:\s*([\d.]+)", result.stderr)]
+            segments = [{"start": start, "end": ends[i] if i < len(ends) else media["duration"]}
+                        for i, start in enumerate(starts)]
+            report["audio"].append({**stream, "meanVolumeDb": volume("mean"),
+                                    "maxVolumeDb": volume("max"), "silenceSegments": segments,
+                                    "silenceSegmentCount": len(segments)})
+            if starts:
+                report["warnings"].append(f"Audio stream {stream['index']} contains silence; listen to verify")
+    except Exception as error:
+        report.setdefault("decode", {"passed": False, "errorCount": None})
+        report["errors"].append(safe_error(error))
+    report["passed"] = not report["errors"]
+    return report
+
+
+def cleanup_previews(directory):
+    # Only remove exact filenames owned by this workflow, never arbitrary frames.
+    target = directory / ".identify"
+    if target.is_symlink():
+        raise ValueError("Refusing to clean a symlinked preview directory")
+    for name in ["preview.jpg", *(f"preview-{i}.jpg" for i in range(1, 5))]:
+        (target / name).unlink(missing_ok=True)
+    if target.is_dir() and not any(target.iterdir()):
+        target.rmdir()
 
 
 def delivery_copy(path, media, output):
@@ -394,13 +455,15 @@ def prepare_one(raw, args):
                             source_info = {"sourcePath": str(source_path), "sourceSha256": source_hash,
                                            "sourceMedia": media}
                         delivered.replace(final_path)
+                        identify_dir = directory / ".identify"
+                        identify_dir.mkdir(exist_ok=True)
                         for frame in attempt.glob("preview*.jpg"):
-                            frame.replace(directory / frame.name)
+                            frame.replace(identify_dir / frame.name)
                         state = {
                             "platform": platform, "videoId": video_id, "canonicalUrl": canonical,
                             "sourceUrl": raw, "path": str(final_path),
                             "sha256": checksum, "media": delivery_media,
-                            "preview": str(directory / Path(sheet).name), **metadata, **source_info,
+                            "preview": str(identify_dir / Path(sheet).name), **metadata, **source_info,
                             "deliveryVersion": DELIVERY_VERSION, "fullDecodeVerified": True,
                             "deliveryPolicy": "H.264 yuv420p/AAC; original retained when conversion is needed",
                         }
@@ -412,6 +475,16 @@ def prepare_one(raw, args):
                     log(message)
             else:
                 raise RuntimeError("; ".join(errors))
+        if not Path(state.get("preview", directory / "missing")).is_file():
+            identify_dir = directory / ".identify"
+            identify_dir.mkdir(exist_ok=True)
+            state["preview"] = preview(Path(state["path"]), state["media"], identify_dir)
+        if state.get("verification", {}).get("sha256") != state["sha256"]:
+            verification = verify_media(Path(state["path"]))
+            if not verification["passed"]:
+                raise ValueError("; ".join(verification["errors"]))
+            state["verification"] = {**verification, "sha256": state["sha256"]}
+        write_json(state_file, state)
         return {
             **state, "stateFile": str(state_file), "folder": "灵感收集",
             "name": state.get("asset", {}).get("name", ""), "tags": [],
@@ -437,10 +510,13 @@ def prepare(args):
 
 
 def load_uploader():
+    runtime = [Path(os.environ[key]).expanduser() for key in
+               ("MINIMAX_DATA_DIR", "MINIMAX_HOME", "CODEX_HOME") if os.environ.get(key)]
+    runtime += [HOME / ".minimax", HOME / ".codex"]
     candidates = [
         os.environ.get("AIGC_UPLOAD_SCRIPT"),
         str(Path(__file__).resolve().parents[2] / "aigc-asset-upload/scripts/upload_assets.py"),
-        str(HOME / ".codex/skills/aigc-asset-upload/scripts/upload_assets.py"),
+        *(str(root / "skills/aigc-asset-upload/scripts/upload_assets.py") for root in runtime),
     ]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
@@ -461,18 +537,19 @@ def validate_item(item):
         raise ValueError("Video changed after preparation; prepare it again")
     if state.get("deliveryVersion") != DELIVERY_VERSION or not compatible(probe(path)):
         raise ValueError("Prepare this video again to validate playback compatibility before upload")
+    verification = state.get("verification", {})
+    if verification.get("sha256") != state["sha256"] or not verification.get("passed"):
+        raise ValueError("Prepare this video again to complete media and audio verification before upload")
     name = item.get("name", "").strip()
     tags = item.get("tags", [])
-    if not name or len(name) > 32 or not isinstance(tags, list) or not 1 <= len(tags) <= 5:
-        raise ValueError("Review the preview and provide a title (1-32 characters) and 1-5 tags")
-    if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
-        raise ValueError("Tags must be nonempty strings")
+    load_uploader().validate_metadata({"name": name, "tags": tags})
     if item.get("folder", "灵感收集") != "灵感收集":
         raise ValueError("This workflow imports into 灵感收集; use aigc-asset-upload for other libraries")
     metadata = {
         "name": name, "tags": tags, "folder": "灵感收集",
         "source": "Instagram" if state["platform"] == "instagram" else "TikTok",
         "sourceUrl": state["sourceUrl"],
+        **{key: item[key] for key in ("characterName", "characterCategory", "characterCandidates") if key in item},
     }
     return state_file, state, path, metadata
 
@@ -492,9 +569,17 @@ def upload_one(item, client):
             asset = client.upload(path, metadata)
         if not isinstance(asset, dict) or not asset.get("id"):
             raise RuntimeError("Server response did not contain an asset ID; rerun to reconcile by hash")
-        receipt = {key: asset[key] for key in ("id", "name", "folder", "sourceUrl") if key in asset}
+        asset = client.get_asset(asset["id"])
+        if status == "uploaded":
+            for key, value in metadata.items():
+                equal = set(asset.get(key, [])) == set(value) if key == "tags" else asset.get(key) == value
+                if not equal:
+                    raise RuntimeError(f"Uploaded metadata differs on readback: {key}; rerun to reconcile")
+        receipt = {key: asset[key] for key in
+                   ("id", "name", "tags", "folder", "sourceUrl", "characterName", "characterCategory", "characterCandidates") if key in asset}
         state["asset"] = receipt
         write_json(state_file, state)
+        cleanup_previews(state_file.parent)
         return {"status": status, "path": str(path), "asset": receipt, "media": state["media"]}
 
 
@@ -522,6 +607,37 @@ def upload(args):
     return int(any(result["status"] == "failed" for result in results))
 
 
+def refresh(args):
+    uploader = load_uploader()
+    client = uploader.Client(args.api or uploader.DEFAULT_API, args.cookie_file or uploader.DEFAULT_COOKIE_FILE)
+    client.require("GET", "/api/auth/me")
+    errors = []
+    with locked(args.manifest.parent):
+        report = read_json(args.manifest)
+        if not isinstance(report.get("items"), list) or not report["items"]:
+            raise ValueError("Manifest has no items")
+        for item in report["items"]:
+            try:
+                state_file = Path(item["stateFile"]).expanduser().resolve()
+                with (nullcontext() if state_file.parent == args.manifest.parent else locked(state_file.parent)):
+                    state = read_json(state_file)
+                    asset_id = state.get("asset", {}).get("id")
+                    if not asset_id:
+                        raise ValueError("No uploaded asset ID; upload/reconcile first")
+                    asset = client.get_asset(asset_id)
+                    receipt = {key: asset[key] for key in
+                               ("id", "name", "tags", "folder", "sourceUrl", "characterName", "characterCategory", "characterCandidates") if key in asset}
+                    state["asset"] = receipt
+                    write_json(state_file, state)
+                    item.update({key: value for key, value in receipt.items() if key != "id"})
+                    item["asset"] = receipt
+            except Exception as error:
+                errors.append({"stateFile": item.get("stateFile"), "error": safe_error(error)})
+        write_json(args.manifest, report)
+    print(json.dumps({"manifest": str(args.manifest), "errors": errors}, ensure_ascii=False, indent=2))
+    return int(bool(errors))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -547,9 +663,16 @@ def parse_args():
     repair = sub.add_parser("repair", help="Create a compatible local MP4, preserving the input")
     repair.add_argument("--input", type=Path, required=True)
     repair.add_argument("--output", type=Path, required=True)
+    check = sub.add_parser("verify", help="Probe, fully decode and measure each audio stream")
+    check.add_argument("--input", type=Path, required=True)
+    check.add_argument("--report", type=Path)
+    sync = sub.add_parser("refresh", help="Refresh local receipts from the current account")
+    sync.add_argument("--manifest", type=Path, required=True)
+    sync.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
+    sync.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
-        if hasattr(args, field):
+        if getattr(args, field, None) is not None:
             setattr(args, field, getattr(args, field).expanduser().resolve())
     return args
 
@@ -560,6 +683,14 @@ def main():
         return prepare(args)
     if args.action == "upload":
         return upload(args)
+    if args.action == "refresh":
+        return refresh(args)
+    if args.action == "verify":
+        report = verify_media(args.input.expanduser().resolve())
+        if args.report:
+            write_json(args.report, report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return int(not report["passed"])
     source, output = args.input.expanduser().resolve(), args.output.expanduser().resolve()
     if output.exists() or output == source or output.suffix.lower() != ".mp4":
         raise ValueError("Choose a new .mp4 output path; existing files are never overwritten")

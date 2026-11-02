@@ -285,8 +285,12 @@ async function createAssetPreview(type, filePath, objectKey, warningLabel = '', 
   }
 }
 
-function parseTags(value) {
+function parseTags(value, strict = false) {
   if (Array.isArray(value)) {
+    if (strict && value.some((item) => typeof item !== 'string' || !item.trim() || /[,，\s]/.test(item))) {
+      throw Object.assign(new Error('素材元数据校验失败'), { statusCode: 400,
+        details: [{ field: 'tags', rule: 'non-empty-token', message: '每个标签须为非空字符串，不能含空格或逗号' }] });
+    }
     // 数组元素也要按空格/逗号拆开：客户端可能把一整串标签塞进单个元素
     // （例如 ["粉色长发 黑猫耳 白衬衫"]），不拆就会存成一个带空格的标签
     const items = value.flatMap((item) => String(item).split(/[,，\s]+/));
@@ -294,9 +298,87 @@ function parseTags(value) {
   }
   try {
     const parsed = JSON.parse(value || '[]');
-    if (Array.isArray(parsed)) return parseTags(parsed);
-  } catch (_) {}
-  return String(value || '').split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
+    if (Array.isArray(parsed)) return parseTags(parsed, strict);
+  } catch (error) {
+    if (error.statusCode) throw error;
+  }
+  return [...new Set(String(value || '').split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean))].slice(0, 30);
+}
+
+const ASSET_FOLDERS = new Set([
+  '灵感收集',
+  '我的创作',
+  '角色设定',
+  '项目资料',
+  '服装库',
+  '发型库',
+  '通用片段',
+  'GIF 素材',
+]);
+const FOLDER_ALIASES = { 成片: '我的创作' };
+
+function normalizeFolder(value, fallback = '灵感收集') {
+  const folder = String(value ?? fallback).trim();
+  return (FOLDER_ALIASES[folder] || folder).slice(0, 80);
+}
+
+function validateAssetMetadata({ name, tags, folder, requireTags = false }) {
+  const errors = [];
+  if (name !== undefined) {
+    const cleanName = typeof name === 'string' ? name.trim() : '';
+    if (!cleanName) errors.push({ field: 'name', rule: 'required', message: '标题不能为空' });
+    if ([...cleanName].length > 32) errors.push({ field: 'name', rule: 'max32', message: '标题最多 32 个字符' });
+    if (/[·.]/.test(cleanName)) errors.push({ field: 'name', rule: 'forbidden-character', message: '标题不能包含 · 或 .' });
+  }
+  if (folder !== undefined && !ASSET_FOLDERS.has(normalizeFolder(folder))) {
+    errors.push({ field: 'folder', rule: 'enum', message: `文件夹必须是：${[...ASSET_FOLDERS].join('、')}` });
+  }
+  if (requireTags || tags !== undefined) {
+    if (!Array.isArray(tags) || new Set(tags).size < 3 || new Set(tags).size > 5) {
+      errors.push({ field: 'tags', rule: 'count3to5', message: '标签数量必须是 3–5 个' });
+    }
+    if (Array.isArray(tags) && tags.some((tag) => typeof tag !== 'string' || !tag.trim())) {
+      errors.push({ field: 'tags', rule: 'non-empty', message: '标签不能包含空值' });
+    }
+  }
+  return errors;
+}
+
+function strictMetadata(req) {
+  return req.get('X-AIGC-Metadata-Policy') === 'curated-v1';
+}
+
+function parseCharacterCandidates(value) {
+  if (value === undefined) return [];
+  let candidates = value;
+  try {
+    if (typeof value === 'string') candidates = JSON.parse(value);
+  } catch (_) {
+    candidates = null;
+  }
+  if (!Array.isArray(candidates) || candidates.length > 5 || candidates.some((item) =>
+    !item || typeof item !== 'object'
+    || ['work', 'name', 'evidence'].some((key) => typeof item[key] !== 'string' || !item[key].trim()
+      || item[key].length > (key === 'evidence' ? 1000 : 120))
+    || typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1
+    || typeof item.confirmed !== 'boolean')) {
+    throw Object.assign(new Error('角色候选应为最多 5 项的数组，含 work/name/evidence/confidence(0–1)/confirmed'), { statusCode: 400 });
+  }
+  return candidates.map(({ work, name, evidence, confidence, confirmed }) =>
+    ({ work: work.trim(), name: name.trim(), evidence: evidence.trim(), confidence, confirmed }));
+}
+
+async function readMediaMetadata(filePath) {
+  try {
+    const { stdout } = await execFileAsync(ffprobePath, ['-v', 'error', '-show_streams', '-of', 'json', filePath], { timeout: 60000 });
+    const streams = JSON.parse(stdout).streams || [];
+    const video = streams.find((stream) => stream.codec_type === 'video' && !stream.disposition?.attached_pic);
+    return { width: video?.width || null, height: video?.height || null,
+      videoCodec: video?.codec_name || '', pixelFormat: video?.pix_fmt || '',
+      audioCodecs: streams.filter((stream) => stream.codec_type === 'audio').map((stream) => stream.codec_name) };
+  } catch (_) {
+    return { probeFailed: true };
+  }
 }
 
 function safeName(name) {
@@ -356,14 +438,19 @@ async function downloadRemoteVideo(url, destination) {
 async function persistAsset({ userId, tempPath, originalName, mimeType, metadata = {} }) {
   const type = mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('video/') ? 'video' : '';
   if (!type) throw new Error('仅支持图片和视频文件');
-  const tags = parseTags(metadata.tags);
+  const tags = parseTags(metadata.tags, metadata.strictMetadata);
   const source = String(metadata.source || 'OSS 导入').trim().slice(0, 120) || 'OSS 导入';
   const sourceUrl = String(metadata.sourceUrl || '').trim().slice(0, 2000);
   const characterName = String(metadata.characterName || '').trim().slice(0, 120);
-  const requestedFolder = String(metadata.folder || '灵感收集').trim();
-  const folder = (requestedFolder === '成片' ? '我的创作' : requestedFolder).slice(0, 80) || '灵感收集';
+  const folder = normalizeFolder(metadata.folder);
   const characterCategory = String(metadata.characterCategory || '').trim().slice(0, 40);
-  const name = safeName(String(metadata.name || path.basename(originalName, path.extname(originalName))));
+  const characterCandidates = parseCharacterCandidates(metadata.characterCandidates);
+  let name = String(metadata.name ?? path.basename(originalName, path.extname(originalName))).trim();
+  const validation = validateAssetMetadata({ name, tags, folder, requireTags: true });
+  if (metadata.strictMetadata && validation.length) {
+    throw Object.assign(new Error('素材元数据校验失败'), { statusCode: 400, details: validation });
+  }
+  if (!metadata.strictMetadata) name = safeName(name);
   const objectKey = `${userId}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalName)}`;
   let thumbKey = null;
   try {
@@ -379,9 +466,10 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, fs.statSync(tempPath).size, sha256, durationSeconds, folder, metadata.used === true || String(metadata.used) === 'true', '新上传素材，等待补充备注。'],
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, fs.statSync(tempPath).size, sha256, durationSeconds, folder, metadata.used === true || String(metadata.used) === 'true', '新上传素材，等待补充备注。',
+          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath))],
       );
       for (const tag of tags.length ? tags : ['待整理']) {
         const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
@@ -421,7 +509,7 @@ function isGifMime(mimeType) {
   return String(mimeType || '').split(';')[0].trim().toLowerCase() === 'image/gif';
 }
 
-async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
+async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, characterCandidates = [], folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
   let thumbKey = null;
   try {
     const preview = await createAssetPreview(type, tempPath, objectKey, 'Uploaded asset', mimeType);
@@ -435,9 +523,10 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, folder, used, '新上传素材，等待补充备注。'],
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+        [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, folder, used, '新上传素材，等待补充备注。',
+          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath))],
       );
       for (const tag of tags.length ? tags : ['待整理']) {
         const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
@@ -481,12 +570,21 @@ async function hydrateAsset(row) {
     sourceUrl: row.source_url,
     characterName: row.character_name || '',
     characterCategory: row.character_category || '',
+    characterCandidates: row.character_candidates || [],
+    mediaMetadata: row.media_metadata || {},
     src: url,
+    streamUrl: row.type === 'video' ? url : '',
+    directUrl: row.type === 'video' ? '' : url,
+    thumbUrl,
     thumb: thumbUrl,
     duration: row.duration_seconds ? formatDuration(row.duration_seconds) : row.type === 'video' ? '待识别' : null,
+    durationSeconds: row.duration_seconds == null ? null : Number(row.duration_seconds),
     date: new Date(row.created_at).toISOString(),
+    createdAt: new Date(row.created_at).toISOString(),
     size: formatBytes(Number(row.size_bytes)),
-    tags: row.tags || [],
+    sizeBytes: Number(row.size_bytes || 0),
+    sha256: row.sha256 || '',
+    tags: [...(row.tags || [])].sort(),
     favorite: row.favorite,
     used: row.used,
     folder: row.folder,
@@ -504,9 +602,9 @@ async function hydrateAsset(row) {
 
 async function assetQuery(id, userId) {
   const result = await pool.query(
-    `SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
-        COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
-        COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
+    `SELECT a.*, COALESCE(array_agg(DISTINCT t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
+        COALESCE(array_agg(DISTINCT r.source_asset_id ORDER BY r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
+        COALESCE(array_agg(DISTINCT d.derived_asset_id ORDER BY d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
        FROM assets a
        LEFT JOIN asset_tags at ON at.asset_id=a.id
        LEFT JOIN tags t ON t.id=at.tag_id
@@ -1119,47 +1217,172 @@ app.post('/api/assets/check-hashes', requireUser, async (req, res, next) => {
   }
 });
 
+app.get('/api/assets/metadata-policy', requireUser, (_req, res) => {
+  res.json({ policy: 'curated-v1', folders: [...ASSET_FOLDERS], folderAliases: FOLDER_ALIASES,
+    nameMaxLength: 32, forbiddenNameCharacters: ['·', '.'], tagsMin: 3, tagsMax: 5 });
+});
+
 app.get('/api/assets', requireUser, async (req, res, next) => {
   try {
+    const params = [req.user.id];
+    const where = ['a.user_id=$1', 'a.deleted_at IS NULL'];
+    let similar = null;
+    if (req.query.similarTo) {
+      if (!uuidPattern.test(String(req.query.similarTo))) return res.status(400).json({ error: 'similarTo 必须是素材 ID' });
+      similar = await assetQuery(req.query.similarTo, req.user.id);
+      if (!similar) return res.status(404).json({ error: '素材不存在' });
+      params.push(similar.id, similar.source_url, similar.folder, similar.duration_seconds);
+      where.push(`a.id<>$2 AND a.type='video' AND (
+        ($3<>'' AND a.source_url=$3) OR (a.folder=$4 AND $5::numeric>0
+          AND a.duration_seconds BETWEEN $5::numeric*0.9 AND $5::numeric*1.1))`);
+    }
+    if (req.query.characterWork || req.query.confirmedCharacter !== undefined) {
+      if (req.query.confirmedCharacter !== undefined && !['true', 'false'].includes(req.query.confirmedCharacter)) {
+        return res.status(400).json({ error: 'confirmedCharacter 必须是 true 或 false' });
+      }
+      const conditions = [];
+      if (req.query.characterWork) {
+        params.push(String(req.query.characterWork));
+        conditions.push(`c->>'work'=$${params.length}`);
+      }
+      if (req.query.characterName) {
+        params.push(String(req.query.characterName));
+        conditions.push(`c->>'name'=$${params.length}`);
+      }
+      if (req.query.confirmedCharacter !== undefined) {
+        params.push(req.query.confirmedCharacter);
+        conditions.push(`c->>'confirmed'=$${params.length}`);
+      }
+      where.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(a.character_candidates) c WHERE ${conditions.join(' AND ')})`);
+    }
+    const ids = String(req.query.ids || req.query.id || '').split(',').map((value) => value.trim()).filter(Boolean);
+    if (ids.length) {
+      if (ids.some((id) => !uuidPattern.test(id))) return res.status(400).json({ error: 'ids 包含无效素材 ID' });
+      params.push(ids);
+      where.push(`a.id = ANY($${params.length}::uuid[])`);
+    }
+    const query = String(req.query.q || req.query.search || '').trim();
+    if (query) {
+      params.push(`%${query}%`);
+      where.push(`(
+        a.name ILIKE $${params.length}
+        OR a.source ILIKE $${params.length}
+        OR a.character_name ILIKE $${params.length}
+        OR EXISTS (
+          SELECT 1 FROM asset_tags q_at JOIN tags q_t ON q_t.id=q_at.tag_id
+          WHERE q_at.asset_id=a.id AND q_t.name ILIKE $${params.length}
+        )
+      )`);
+    }
+    if (req.query.folder) {
+      params.push(normalizeFolder(req.query.folder));
+      where.push(`a.folder=$${params.length}`);
+    }
+    if (req.query.tag) {
+      params.push(String(req.query.tag).trim());
+      where.push(`EXISTS (
+        SELECT 1 FROM asset_tags filter_at JOIN tags filter_t ON filter_t.id=filter_at.tag_id
+        WHERE filter_at.asset_id=a.id AND filter_t.name=$${params.length}
+      )`);
+    }
+    for (const [key, column] of [['sourceUrl', 'source_url'], ['characterName', 'character_name']]) {
+      if (req.query[key] && !(key === 'characterName' && (req.query.characterWork || req.query.confirmedCharacter !== undefined))) {
+        params.push(String(req.query[key]));
+        where.push(`a.${column}=$${params.length}`);
+      }
+    }
+    for (const [key, operator] of [['duration_min', '>='], ['duration_max', '<=']]) {
+      if (req.query[key] !== undefined) {
+        const value = Number(req.query[key]);
+        if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: `${key} 必须是非负数` });
+        params.push(value);
+        where.push(`a.duration_seconds ${operator} $${params.length}`);
+      }
+    }
+    if (req.query.since) {
+      const since = new Date(String(req.query.since));
+      if (Number.isNaN(since.getTime())) return res.status(400).json({ error: 'since 必须是有效的 ISO 日期' });
+      params.push(since.toISOString());
+      where.push(`a.created_at >= $${params.length}::timestamptz`);
+    }
+    for (const key of ['limit', 'offset']) {
+      if (req.query[key] !== undefined && !/^\d+$/.test(String(req.query[key]))) {
+        return res.status(400).json({ error: `${key} 必须是整数` });
+      }
+    }
+    // Existing web and skill clients expect the full library when pagination is omitted.
+    const limit = req.query.limit === undefined ? null : Math.min(Math.max(Number(req.query.limit), 1), 200);
+    const offset = Number(req.query.offset || 0);
+    if (!Number.isSafeInteger(offset)) return res.status(400).json({ error: 'offset 超出范围' });
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM assets a WHERE ${where.join(' AND ')}`, params);
+    const listParams = [...params, limit, offset];
     // 先分别聚合标签和关系，再回连素材。直接同时 JOIN 三张多行表会产生
     // tags × parents × derived 的中间结果，素材越多、关系越多，首屏越慢。
     const { rows } = await pool.query(
-      `SELECT a.id, a.name, a.type, a.source, a.source_url, a.character_name,
-          a.character_category, a.object_key, a.thumb_key, a.content_type,
+      `WITH selected AS (
+         SELECT a.* FROM assets a WHERE ${where.join(' AND ')}
+         ORDER BY a.created_at DESC, a.id DESC
+         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}
+       )
+       SELECT a.id, a.name, a.type, a.source, a.source_url, a.character_name,
+          a.character_category, a.character_candidates, a.media_metadata, a.object_key, a.thumb_key, a.content_type,
           a.size_bytes, a.sha256, a.duration_seconds, a.folder, a.note,
           a.music_title, a.music_artist, a.music_source, a.music_status,
           a.music_confidence, a.music_evidence, a.favorite, a.used, a.created_at,
           COALESCE(tags.tags, '{}') AS tags,
           COALESCE(parents.parent_asset_ids, '{}') AS parent_asset_ids,
           COALESCE(derived.derived_asset_ids, '{}') AS derived_asset_ids
-         FROM assets a
+         FROM selected a
          LEFT JOIN (
            SELECT at.asset_id, array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL) AS tags
              FROM asset_tags at
              JOIN tags t ON t.id=at.tag_id
-             JOIN assets ta ON ta.id=at.asset_id
-            WHERE ta.user_id=$1 AND ta.deleted_at IS NULL
+             JOIN selected ta ON ta.id=at.asset_id
             GROUP BY at.asset_id
          ) tags ON tags.asset_id=a.id
          LEFT JOIN (
            SELECT derived_asset_id AS asset_id, array_agg(DISTINCT source_asset_id) AS parent_asset_ids
              FROM asset_relations ar
-             JOIN assets pa ON pa.id=ar.derived_asset_id
-            WHERE pa.user_id=$1 AND pa.deleted_at IS NULL
+             JOIN selected pa ON pa.id=ar.derived_asset_id
             GROUP BY ar.derived_asset_id
          ) parents ON parents.asset_id=a.id
          LEFT JOIN (
            SELECT source_asset_id AS asset_id, array_agg(DISTINCT derived_asset_id) AS derived_asset_ids
              FROM asset_relations ar
-             JOIN assets da ON da.id=ar.source_asset_id
-            WHERE da.user_id=$1 AND da.deleted_at IS NULL
+             JOIN selected da ON da.id=ar.source_asset_id
             GROUP BY ar.source_asset_id
          ) derived ON derived.asset_id=a.id
-        WHERE a.user_id=$1 AND a.deleted_at IS NULL
-        ORDER BY a.created_at DESC`,
-      [req.user.id],
+        ORDER BY a.created_at DESC, a.id DESC`,
+      listParams,
     );
-    res.json({ assets: await Promise.all(rows.map(hydrateAsset)) });
+    const total = countResult.rows[0].total;
+    const assets = await Promise.all(rows.map(hydrateAsset));
+    if (similar) assets.forEach((asset) => {
+      asset.similarityReasons = [
+        ...(similar.source_url && asset.sourceUrl === similar.source_url ? ['sameSourceUrl'] : []),
+        ...(asset.folder === similar.folder && Number(similar.duration_seconds) > 0
+          && Math.abs(asset.durationSeconds - Number(similar.duration_seconds)) <= Number(similar.duration_seconds) * 0.1
+          ? ['sameFolderAndDurationWithin10Percent'] : []),
+      ];
+    });
+    res.json({
+      assets,
+      total,
+      offset,
+      limit,
+      hasMore: offset + rows.length < total,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/assets/:id', requireUser, async (req, res, next) => {
+  try {
+    if (!uuidPattern.test(req.params.id)) return res.status(400).json({ error: '素材 ID 无效' });
+    const row = await assetQuery(req.params.id, req.user.id);
+    if (!row) return res.status(404).json({ error: '素材不存在' });
+    res.json({ asset: await hydrateAsset(row) });
   } catch (error) {
     next(error);
   }
@@ -1244,7 +1467,13 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     const type = assetTypeFromMime(req.file.mimetype);
     if (!type) return res.status(415).json({ error: '仅支持图片和视频文件' });
     const originalFilename = decodeMultipartFilename(req.file.originalname);
-    const name = safeName(String(req.body.name || path.basename(originalFilename, path.extname(originalFilename))));
+    let name = String(req.body.name ?? path.basename(originalFilename, path.extname(originalFilename))).trim();
+    const folder = normalizeFolder(req.body.folder);
+    const tags = parseTags(req.body.tags, strictMetadata(req));
+    const validation = validateAssetMetadata({ name, tags, folder, requireTags: true });
+    if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
+    if (!strictMetadata(req)) name = safeName(name);
+    const characterCandidates = parseCharacterCandidates(req.body.characterCandidates);
     const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalFilename)}`;
     await putObject(objectKey, tempPath, req.file.mimetype, mediaCacheControl);
     const asset = await ingestAsset({
@@ -1257,9 +1486,10 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
       sourceUrl: String(req.body.sourceUrl || '').trim().slice(0, 2000),
       characterName: String(req.body.characterName || '').trim().slice(0, 120),
       characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
-      folder: (String(req.body.folder || '灵感收集').trim() === '成片' ? '我的创作' : String(req.body.folder || '灵感收集').trim()).slice(0, 80) || '灵感收集',
+      characterCandidates,
+      folder,
       used: req.body.used === 'true',
-      tags: parseTags(req.body.tags),
+      tags,
       parentIds: parseTags(req.body.parentAssetIds),
       mimeType: req.file.mimetype,
       sizeBytes: req.file.size,
@@ -1323,6 +1553,13 @@ app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
       return res.status(400).json({ error: '上传的文件大小无效或超过限制' });
     }
     const originalName = path.basename(objectKey).replace(/^[0-9a-f-]{36}-/i, '');
+    let name = String(req.body.name ?? path.basename(originalName, path.extname(originalName))).trim();
+    const folder = normalizeFolder(req.body.folder);
+    const tags = parseTags(req.body.tags, strictMetadata(req));
+    const validation = validateAssetMetadata({ name, tags, folder, requireTags: true });
+    if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
+    if (!strictMetadata(req)) name = safeName(name);
+    const characterCandidates = parseCharacterCandidates(req.body.characterCandidates);
     tempPath = path.join(uploadDir, `${crypto.randomUUID()}-${safeName(originalName)}`);
     await downloadObject(objectKey, tempPath);
     const asset = await ingestAsset({
@@ -1330,14 +1567,15 @@ app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
       tempPath,
       objectKey,
       type,
-      name: safeName(String(req.body.name || path.basename(originalName, path.extname(originalName)))),
+      name,
       source: String(req.body.source || '本地导入').trim().slice(0, 120) || '本地导入',
       sourceUrl: String(req.body.sourceUrl || '').trim().slice(0, 2000),
       characterName: String(req.body.characterName || '').trim().slice(0, 120),
       characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
-      folder: (String(req.body.folder || '灵感收集').trim() === '成片' ? '我的创作' : String(req.body.folder || '灵感收集').trim()).slice(0, 80) || '灵感收集',
+      characterCandidates,
+      folder,
       used: req.body.used === true || req.body.used === 'true',
-      tags: parseTags(req.body.tags),
+      tags,
       parentIds: parseTags(req.body.parentAssetIds),
       mimeType,
       sizeBytes,
@@ -1365,11 +1603,11 @@ async function applyAssetFileReplacement({ userId, assetId, current, tempPath, o
     const sha256 = await hashFile(tempPath);
     const { rows } = await pool.query(
       `UPDATE assets
-          SET object_key=$1, thumb_key=$2, content_type=$3, size_bytes=$4, sha256=$5, duration_seconds=$6,
+          SET object_key=$1, thumb_key=$2, content_type=$3, size_bytes=$4, sha256=$5, duration_seconds=$6, media_metadata=$9,
               music_title='', music_artist='', music_source='', music_status='', music_confidence='', music_evidence=''
         WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL
         RETURNING *`,
-      [objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, assetId, userId],
+      [objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, assetId, userId, JSON.stringify(await readMediaMetadata(tempPath))],
     );
     if (!rows[0]) throw Object.assign(new Error('素材不存在'), { statusCode: 404 });
     if (type === 'video') await pool.query('DELETE FROM asset_music WHERE asset_id=$1', [assetId]);
@@ -1485,14 +1723,15 @@ app.post('/api/assets/import-urls', requireUser, async (req, res, next) => {
             tempPath,
             originalName,
             mimeType: downloaded.mimeType,
-            metadata: { ...item, source: item.source || 'OSS 导入', sourceUrl: item.sourceUrl || url },
+            metadata: { ...item, strictMetadata: strictMetadata(req), source: item.source || 'OSS 导入', sourceUrl: item.sourceUrl || url },
           });
           results.push({ index, url, ok: true, asset });
         } finally {
           await fsp.unlink(tempPath).catch(() => {});
         }
       } catch (error) {
-        results.push({ index, url, ok: false, error: error.message || '导入失败' });
+        results.push({ index, url, ok: false, error: error.message || '导入失败',
+          ...(error.details ? { fields: error.details } : {}) });
       }
     }
     const succeeded = results.filter((item) => item.ok).length;
@@ -1504,6 +1743,17 @@ app.post('/api/assets/import-urls', requireUser, async (req, res, next) => {
 
 app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
   try {
+    if (Object.prototype.hasOwnProperty.call(req.body, 'tags')) {
+      return res.status(400).json({ error: '请使用 PATCH /api/assets/:id/organize 整体替换标签' });
+    }
+    if (strictMetadata(req)) {
+      const validation = validateAssetMetadata({
+        name: req.body.name,
+        tags: req.body.tags === undefined ? undefined : parseTags(req.body.tags),
+        folder: req.body.folder,
+      });
+      if (validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
+    }
     const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory', 'musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'];
     const hasParentAssetIds = Object.prototype.hasOwnProperty.call(req.body, 'parentAssetIds');
     const requestedParentAssetIds = hasParentAssetIds ? parseTags(req.body.parentAssetIds) : [];
@@ -1534,8 +1784,8 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
             ? String(req.body[key] || '').trim().slice(0, 40)
             : ['musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'].includes(key)
               ? String(req.body[key] || '').trim().slice(0, key === 'musicEvidence' ? 1000 : 200)
-            : key === 'folder' && String(req.body[key]) === '成片'
-              ? '我的创作'
+            : key === 'folder'
+              ? normalizeFolder(req.body[key])
               : req.body[key];
         values.push(value);
         fields.push(`${dbKey}=$${values.length}`);
@@ -1546,7 +1796,7 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
     try {
       await client.query('BEGIN');
       const owned = await client.query(
-        'SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL',
+        'SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR UPDATE',
         [req.params.id, req.user.id],
       );
       if (!owned.rows[0]) {
@@ -1689,11 +1939,13 @@ app.delete('/api/comments/:id', requireUser, async (req, res, next) => {
 
 app.post('/api/assets/:id/tags', requireUser, async (req, res, next) => {
   try {
-    const tags = parseTags(req.body.tags);
+    const tags = parseTags(req.body.tags, strictMetadata(req));
+    const validation = validateAssetMetadata({ tags });
+    if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const exists = await client.query('SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL', [req.params.id, req.user.id]);
+      const exists = await client.query('SELECT id FROM assets WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR UPDATE', [req.params.id, req.user.id]);
       if (!exists.rows[0]) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: '素材不存在' });
@@ -1716,11 +1968,14 @@ app.post('/api/assets/:id/tags', requireUser, async (req, res, next) => {
   }
 });
 
-app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
+async function organizeAsset(req, res, next) {
   const assetFields = [
-    ['name', 'name', (value) => safeName(value)],
+    ['name', 'name', (value) => strictMetadata(req) ? String(value || '').trim() : safeName(value)],
+    ['favorite', 'favorite', (value) => value],
+    ['used', 'used', (value) => value],
+    ['characterCandidates', 'character_candidates', (value) => JSON.stringify(parseCharacterCandidates(value))],
     ['note', 'note', (value) => String(value || '').trim().slice(0, 5000)],
-    ['folder', 'folder', (value) => (String(value || '').trim() === '成片' ? '我的创作' : String(value || '').trim()).slice(0, 80)],
+    ['folder', 'folder', (value) => normalizeFolder(value, '')],
     ['source', 'source', (value) => String(value || '').trim().slice(0, 120)],
     ['sourceUrl', 'source_url', (value) => String(value || '').trim().slice(0, 2000)],
     ['characterName', 'character_name', (value) => String(value || '').trim().slice(0, 120)],
@@ -1733,6 +1988,24 @@ app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
     ['musicEvidence', 'music_evidence', (value) => String(value || '').trim().slice(0, 1000)],
   ];
   try {
+    if (!uuidPattern.test(req.params.id)) return res.status(400).json({ error: '素材 ID 无效' });
+    if (req.body.characterCandidates !== undefined) parseCharacterCandidates(req.body.characterCandidates);
+    const validation = validateAssetMetadata({
+      name: req.body.name,
+      tags: Object.prototype.hasOwnProperty.call(req.body, 'tags') ? parseTags(req.body.tags, strictMetadata(req)) : undefined,
+      folder: Object.prototype.hasOwnProperty.call(req.body, 'folder') ? String(req.body.folder || '').trim() : undefined,
+      requireTags: Object.prototype.hasOwnProperty.call(req.body, 'tags'),
+    });
+    if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
+    for (const key of ['favorite', 'used']) {
+      if (req.body[key] !== undefined && typeof req.body[key] !== 'boolean') return res.status(400).json({ error: `${key} 必须是布尔值` });
+    }
+    const hasParents = Object.prototype.hasOwnProperty.call(req.body, 'parentAssetIds');
+    const parentIds = req.body.parentAssetIds;
+    if (hasParents && (!Array.isArray(parentIds) || parentIds.some((id) => !uuidPattern.test(String(id)) || String(id).toLowerCase() === req.params.id.toLowerCase())
+        || new Set(parentIds.map((id) => String(id).toLowerCase())).size !== parentIds.length)) {
+      return res.status(400).json({ error: '关联素材 ID 无效、重复或包含自身' });
+    }
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -1740,6 +2013,28 @@ app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
       if (!exists.rows[0]) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: '素材不存在' });
+      }
+      if (req.body.before !== undefined) {
+        const before = req.body.before;
+        if (!before || typeof before !== 'object' || Array.isArray(before)) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'before 必须是对象' });
+        }
+        const current = exists.rows[0];
+        const tags = await client.query('SELECT t.name FROM asset_tags at JOIN tags t ON t.id=at.tag_id WHERE at.asset_id=$1', [req.params.id]);
+        const parents = await client.query('SELECT source_asset_id FROM asset_relations WHERE derived_asset_id=$1', [req.params.id]);
+        const values = Object.fromEntries(assetFields.map(([key, dbKey]) => [key, current[dbKey]]));
+        values.tags = tags.rows.map((row) => row.name);
+        values.parentAssetIds = parents.rows.map((row) => row.source_asset_id);
+        const canonical = (value) => Array.isArray(value) ? value.map(canonical)
+          : value && typeof value === 'object'
+            ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+        const comparable = (key, value) => JSON.stringify(canonical(
+          ['tags', 'parentAssetIds'].includes(key) && Array.isArray(value) ? [...value].sort() : value));
+        if (Object.entries(before).some(([key, value]) => !(key in values) || comparable(key, value) !== comparable(key, values[key]))) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: '素材在预览后已变化，请重新读取并确认' });
+        }
       }
       const fields = [];
       const values = [];
@@ -1761,7 +2056,18 @@ app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
           await client.query('INSERT INTO asset_tags(asset_id,tag_id) VALUES($1,$2)', [req.params.id, tagRow.rows[0].id]);
         }
       }
-      if (!fields.length && !Object.prototype.hasOwnProperty.call(req.body, 'tags')) {
+      if (hasParents) {
+        const owned = await client.query('SELECT id FROM assets WHERE id=ANY($1::uuid[]) AND user_id=$2 AND deleted_at IS NULL', [parentIds, req.user.id]);
+        if (owned.rows.length !== parentIds.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: '关联素材不存在或不属于当前账号' });
+        }
+        await client.query('DELETE FROM asset_relations WHERE derived_asset_id=$1', [req.params.id]);
+        for (const id of parentIds) {
+          await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) VALUES($1,$2)', [id, req.params.id]);
+        }
+      }
+      if (!fields.length && !hasParents && !Object.prototype.hasOwnProperty.call(req.body, 'tags')) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: '没有可更新字段' });
       }
@@ -1774,6 +2080,37 @@ app.patch('/api/assets/:id/organize', requireUser, async (req, res, next) => {
     } finally {
       client.release();
     }
+  } catch (error) {
+    next(error);
+  }
+}
+
+app.patch('/api/assets/:id/organize', requireUser, organizeAsset);
+
+app.patch('/api/assets', requireUser, async (req, res, next) => {
+  try {
+    const items = req.body.items || (Array.isArray(req.body.ids)
+      ? req.body.ids.map((id) => ({ ...req.body.changes, id })) : null);
+    if (!Array.isArray(items) || !items.length || items.length > 100
+        || items.some((item) => !item || !uuidPattern.test(String(item.id)))
+        || new Set(items.map((item) => item.id.toLowerCase())).size !== items.length) {
+      return res.status(400).json({ error: '提供 1–100 个不同素材 ID 的 items，或 ids 与 changes' });
+    }
+    const results = [];
+    for (const { id, ...body } of items) {
+      let status = 200;
+      const response = { status(code) { status = code; return this; },
+        json(payload) { results.push({ id, status, ok: status === 200, ...payload }); } };
+      await organizeAsset({ user: req.user, params: { id }, body, get: (name) => req.get(name) }, response,
+        (error) => {
+          console.error(error);
+          response.status(error.statusCode || 500).json({
+            error: error.statusCode ? error.message : '服务器内部错误',
+            ...(error.statusCode && error.details ? { fields: error.details } : {}),
+          });
+        });
+    }
+    res.json({ results });
   } catch (error) {
     next(error);
   }
@@ -2276,7 +2613,13 @@ app.get('/api/netdisk/sync-commands', requireUser, (req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 500).json({ error: error.code === 'LIMIT_FILE_SIZE' ? '文件超过 2 GB 限制' : '服务器内部错误' });
+  if (res.headersSent) return;
+  if (error.details && error.statusCode) {
+    return res.status(error.statusCode).json({ error: error.message, fields: error.details });
+  }
+  res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : error.statusCode || 500).json({
+    error: error.code === 'LIMIT_FILE_SIZE' ? '文件超过 2 GB 限制' : error.statusCode ? error.message : '服务器内部错误',
+  });
 });
 
 async function start() {

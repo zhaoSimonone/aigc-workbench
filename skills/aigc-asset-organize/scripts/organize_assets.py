@@ -15,10 +15,14 @@ import uuid
 from urllib.parse import urljoin, urlparse
 import http.client
 
+upload_script = Path(os.environ.get("AIGC_UPLOAD_SCRIPT") or
+                     Path(__file__).resolve().parents[2] / "aigc-asset-upload/scripts/upload_assets.py").expanduser()
+sys.path.insert(0, str(upload_script.parent))
+from shelf_client import Client as ShelfClient, APIError, default_cookie_file, validate_metadata, LEGACY_FOLDERS, tool_dirs
 
 DEFAULT_API = "https://aigc.chatcanvas.online"
-DEFAULT_COOKIE_FILE = Path.home() / ".codex" / "aigc-shelf-session.json"
-FOLDERS = ("灵感收集", "我的创作", "角色设定", "项目资料", "服装库", "发型库", "通用片段")
+DEFAULT_COOKIE_FILE = default_cookie_file()
+FOLDERS = tuple(LEGACY_FOLDERS)
 TAB_ALIASES = {
     "灵感收集整理": "灵感收集",
     "我的创作整理": "我的创作",
@@ -36,7 +40,7 @@ TAB_ALIASES = {
 MUSIC_FIELDS = ("musicTitle", "musicArtist", "musicSource", "musicStatus", "musicConfidence", "musicEvidence")
 ASSET_FIELDS = (
     "name", "tags", "note", "folder", "source", "sourceUrl", "characterName", "characterCategory",
-    *MUSIC_FIELDS,
+    "favorite", "used", "parentAssetIds", "characterCandidates", *MUSIC_FIELDS,
 )
 PLACEHOLDER_TAGS = {"待整理", "未分类", "占位"}
 PLACEHOLDER_NAMES = {"", "未命名素材", "新上传素材", "无标题", "待整理"}
@@ -53,77 +57,7 @@ def parse_json(payload):
         return {"raw": payload[:500].decode("utf-8", "replace")}
 
 
-class Client:
-    def __init__(self, base_url, cookie_file):
-        parsed = urlparse(base_url.rstrip("/"))
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise ValueError("AIGC_SHELF_URL 必须是 HTTP(S) 地址")
-        self.scheme = parsed.scheme
-        self.host = parsed.hostname
-        self.port = parsed.port
-        self.base_path = parsed.path.rstrip("/")
-        self.base_url = base_url.rstrip("/")
-        self.cookie_file = Path(cookie_file).expanduser()
-        self.cookies = self._load_cookies()
-
-    def _load_cookies(self):
-        try:
-            data = json.loads(self.cookie_file.read_text())
-            return {str(key): str(value) for key, value in data.items()}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_cookies(self):
-        self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cookie_file.write_text(json.dumps(self.cookies))
-        try:
-            self.cookie_file.chmod(0o600)
-        except OSError:
-            pass
-
-    def request(self, method, path, body=None, headers=None):
-        connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-        connection = connection_class(self.host, self.port, timeout=900)
-        request_headers = {"Accept": "application/json", **(headers or {})}
-        if self.cookies:
-            request_headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in self.cookies.items())
-        request_path = path if path.startswith("/") else f"/{path}"
-        connection.request(method, f"{self.base_path}{request_path}", body=body, headers=request_headers)
-        response = connection.getresponse()
-        payload = response.read()
-        set_cookie = response.headers.get("Set-Cookie")
-        if set_cookie:
-            pair = set_cookie.split(";", 1)[0]
-            if "=" in pair:
-                name, value = pair.split("=", 1)
-                if value:
-                    self.cookies[name] = value
-                else:
-                    self.cookies.pop(name, None)
-            self._save_cookies()
-        connection.close()
-        return response.status, parse_json(payload)
-
-    def ensure_login(self):
-        status, payload = self.request("GET", "/api/auth/me")
-        if status == 200:
-            return (payload or {}).get("user", {})
-        email = os.environ.get("AIGC_SHELF_EMAIL") or input("AIGC Shelf 登录邮箱: ").strip()
-        password = os.environ.get("AIGC_SHELF_PASSWORD") or getpass.getpass("AIGC Shelf 登录密码: ")
-        body = json.dumps({"email": email, "password": password}).encode()
-        status, payload = self.request("POST", "/api/auth/login", body, {
-            "Content-Type": "application/json", "Content-Length": str(len(body)),
-        })
-        if status != 200:
-            raise RuntimeError((payload or {}).get("error", "AIGC Shelf 登录失败"))
-        return (payload or {}).get("user", {})
-
-    def list_assets(self):
-        status, payload = self.request("GET", "/api/assets")
-        if status != 200:
-            raise RuntimeError((payload or {}).get("error", f"读取素材失败 HTTP {status}"))
-        return (payload or {}).get("assets", [])
-
+class Client(ShelfClient):
     def list_music_tracks(self):
         status, payload = self.request("GET", "/api/music-tracks")
         if status != 200:
@@ -208,65 +142,15 @@ class Client:
             raise RuntimeError((payload or {}).get("error", f"合并音乐失败 HTTP {status}"))
         return payload or {}
 
-    def organize(self, asset_id, fields):
-        body = json.dumps(fields, ensure_ascii=False).encode()
+    def organize(self, asset_id, fields, before=None):
+        body = json.dumps({**fields, **({"before": before} if before is not None else {})}, ensure_ascii=False).encode()
         status, payload = self.request("PATCH", f"/api/assets/{asset_id}/organize", body, {
             "Content-Type": "application/json", "Content-Length": str(len(body)),
+            "X-AIGC-Metadata-Policy": "curated-v1",
         })
-        if status == 404:
-            return self.legacy_organize(asset_id, fields)
         if status != 200:
-            raise RuntimeError((payload or {}).get("error", f"写回失败 HTTP {status}"))
+            raise APIError(status, payload, self.last_response.get("headers"))
         return (payload or {}).get("asset", {}), []
-
-    def legacy_organize(self, asset_id, fields):
-        """Fallback for production servers that predate the atomic organize route."""
-        supported = {key: value for key, value in fields.items() if key in {
-            "name", "note", "folder", "source", "sourceUrl", "characterName", "characterCategory",
-        }}
-        warnings = []
-        unsupported = sorted(set(fields) - set(supported) - {"tags"})
-        if unsupported:
-            warnings.append(f"旧版服务端未保存字段：{', '.join(unsupported)}")
-        if supported:
-            body = json.dumps(supported, ensure_ascii=False).encode()
-            status, payload = self.request("PATCH", f"/api/assets/{asset_id}", body, {
-                "Content-Type": "application/json", "Content-Length": str(len(body)),
-            })
-            if status != 200:
-                raise RuntimeError((payload or {}).get("error", f"旧接口写回失败 HTTP {status}"))
-        if "tags" in fields:
-            tag_body = json.dumps({"tags": fields["tags"]}, ensure_ascii=False).encode()
-            status, payload = self.request("POST", f"/api/assets/{asset_id}/tags", tag_body, {
-                "Content-Type": "application/json", "Content-Length": str(len(tag_body)),
-            })
-            if status != 204:
-                raise RuntimeError((payload or {}).get("error", f"旧接口标签写回失败 HTTP {status}"))
-        return {}, warnings
-
-    def download(self, url, destination):
-        parsed = urlparse(urljoin(self.base_url + "/", url))
-        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        connection = connection_class(parsed.hostname, parsed.port, timeout=900)
-        headers = {}
-        if self.cookies and parsed.hostname == self.host:
-            headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in self.cookies.items())
-        path = parsed.path or "/"
-        if parsed.query:
-            path += f"?{parsed.query}"
-        connection.request("GET", path, headers=headers)
-        response = connection.getresponse()
-        if response.status >= 400:
-            connection.close()
-            raise RuntimeError(f"下载素材失败 HTTP {response.status}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("wb") as stream:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                stream.write(chunk)
-        connection.close()
 
 
 def explicit_name(name):
@@ -292,6 +176,8 @@ def asset_value(asset, key):
     """Treat music fields as empty while older API deployments omit them."""
     if key in MUSIC_FIELDS:
         return asset.get(key) or ""
+    if key in ("tags", "parentAssetIds"):
+        return sorted(asset.get(key) or [])
     return asset.get(key)
 
 
@@ -339,7 +225,7 @@ def print_inspection(items, as_json=False):
         print(f"  媒体地址：{asset.get('src') or asset.get('thumb') or '无'}")
 
 
-def normalise_plan(plan):
+def normalise_plan(plan, folders=FOLDERS):
     if isinstance(plan, dict):
         plan = plan.get("items")
     if not isinstance(plan, list):
@@ -364,10 +250,9 @@ def normalise_plan(plan):
             raise ValueError(f"plan 第 {index} 项包含不支持的字段：{', '.join(sorted(unknown))}")
         if "tags" in after and not isinstance(after["tags"], list):
             raise ValueError(f"plan 第 {index} 项 tags 必须是数组")
-        if "tags" in after and (len(after["tags"]) > 5 or any(not isinstance(tag, str) or not tag.strip() for tag in after["tags"])):
-            raise ValueError(f"plan 第 {index} 项 tags 最多 5 个且不能包含空标签")
-        if "folder" in after and after["folder"] not in FOLDERS:
-            raise ValueError(f"plan 第 {index} 项 folder 必须是：{'、'.join(FOLDERS)}")
+        validate_metadata(after)
+        if "folder" in after and after["folder"] not in folders:
+            raise ValueError(f"plan 第 {index} 项 folder 必须是：{'、'.join(folders)}")
         if "name" in after and not str(after["name"] or "").strip():
             raise ValueError(f"plan 第 {index} 项 name 不能为空")
         result.append(item)
@@ -375,7 +260,7 @@ def normalise_plan(plan):
 
 
 def changed_fields(before, after):
-    return {key: value for key, value in after.items() if asset_value(before, key) != value}
+    return {key: value for key, value in after.items() if asset_value(before, key) != asset_value(after, key)}
 
 
 def print_diff(items, current_by_id):
@@ -407,7 +292,9 @@ def print_diff(items, current_by_id):
 
 def inspect_command(client, args):
     user = client.ensure_login()
-    items = select_assets(client.list_assets(), args)
+    assets = ([client.get_asset(asset_id) for asset_id in args.asset_id] if args.asset_id else
+              client.list_assets(folder=TAB_ALIASES.get(args.tab, args.tab) if args.tab else "灵感收集"))
+    items = select_assets(assets, args)
     tab = TAB_ALIASES.get(args.tab, args.tab) if args.tab else None
     payload = {
         "user": {"id": user.get("id"), "name": user.get("name") or user.get("email")},
@@ -432,20 +319,38 @@ def inspect_command(client, args):
 
 
 def apply_command(client, args):
-    try:
-        plan = normalise_plan(json.loads(Path(args.plan).read_text() if args.plan != "-" else sys.stdin.read()))
-    except (OSError, json.JSONDecodeError, ValueError) as error:
-        raise RuntimeError(f"无法读取整理提案：{error}") from error
     client.ensure_login()
-    current_by_id = {str(asset.get("id")): asset for asset in client.list_assets()}
+    folders = client.metadata_policy()["folders"]
+    if args.plan:
+        try:
+            plan = normalise_plan(json.loads(Path(args.plan).read_text() if args.plan != "-" else sys.stdin.read()), folders)
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            raise RuntimeError(f"无法读取整理提案：{error}") from error
+        current_by_id = {item["id"]: client.get_asset(item["id"]) for item in plan}
+    else:
+        fields = {}
+        if args.set_name is not None:
+            fields["name"] = args.set_name
+        if args.set_tags is not None:
+            fields["tags"] = list(dict.fromkeys(re.split(r"[,，\s]+", args.set_tags.strip())))
+        validate_metadata(fields)
+        current_by_id = {asset_id: client.get_asset(asset_id) for asset_id in args.asset_id}
+        plan = normalise_plan([{"id": asset_id, "before": {key: asset_value(asset, key) for key in fields},
+                                "after": fields, "reason": args.reason or "按用户指定字段更新"}
+                               for asset_id, asset in current_by_id.items()])
+    if args.save_plan:
+        with Path(args.save_plan).expanduser().open("x", encoding="utf-8") as handle:
+            json.dump({"items": plan}, handle, ensure_ascii=False, indent=2)
     changes = print_diff(plan, current_by_id)
     if not args.confirm:
         print("预览模式：未写回。获得用户明确确认后，再加 --confirm 重试。")
         return 0
-    failures = 0
+    failures = sum(1 for item in plan if any(
+        asset_value(current_by_id[item["id"]], key) != asset_value(item["before"], key)
+        for key in item["before"]))
     for item, current, after in changes:
         try:
-            _asset, warnings = client.organize(item["id"], after)
+            _asset, warnings = client.organize(item["id"], after, before=item["before"])
             print(f"[{item['id']}] 已更新")
             for warning in warnings:
                 print(f"[{item['id']}] 提醒：{warning}", file=sys.stderr)
@@ -456,7 +361,9 @@ def apply_command(client, args):
 
 
 def resolve_binary(name, override=None):
-    candidates = [override, os.environ.get(f"AIGC_{name.upper()}_PATH"), shutil.which(name)]
+    candidates = [override, os.environ.get(f"AIGC_{name.upper()}_PATH"),
+                  os.environ.get(f"{name.upper()}_PATH"), shutil.which(name)]
+    candidates.extend(str(directory / name) for directory in tool_dirs())
     repo_root = Path(__file__).resolve().parents[3]
     package_root = repo_root / "server" / "node_modules"
     if name == "ffmpeg":
@@ -780,12 +687,16 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Inspect and safely organize AIGC Shelf assets")
     parser.add_argument("command", choices=("inspect", "apply", "music-library"))
     parser.add_argument("--asset-id", action="append", default=[])
-    parser.add_argument("--tab", choices=(*FOLDERS, *TAB_ALIASES))
+    parser.add_argument("--tab", help="服务端文件夹名称或整理别名")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--music", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--download-dir")
     parser.add_argument("--plan")
+    parser.add_argument("--set-name")
+    parser.add_argument("--set-tags")
+    parser.add_argument("--reason")
+    parser.add_argument("--save-plan", help="将当前 diff 快照保存到新文件，供确认后 --plan 使用")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--build", action="store_true", help="构建或重新扫描音乐库")
     parser.add_argument("--dedupe-content", action="store_true", help="按本地感知音频指纹合并相同音乐的不同片段")
@@ -798,8 +709,10 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.command == "apply" and not args.plan:
-        raise SystemExit("apply 必须指定 --plan PATH")
+    if args.command == "apply":
+        direct = args.set_name is not None or args.set_tags is not None
+        if bool(args.plan) == direct or (direct and not args.asset_id):
+            raise SystemExit("apply 使用 --plan，或 --asset-id 加 --set-name/--set-tags；两种模式不能混用")
     client = Client(args.api, args.cookie_file)
     if args.command == "inspect":
         return inspect_command(client, args)

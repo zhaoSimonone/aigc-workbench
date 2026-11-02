@@ -195,6 +195,10 @@ python3 /Users/simon/Desktop/dev/code/aigc-workbench/skills/aigc-asset-upload/sc
 
 - 上传是外部状态变更，只在用户明确要求上传时执行。
 - 不读取 `/Users/simon/Desktop/dev/cloud/tencent` 下的凭据文件，不在日志、参数、提交或回复中输出 COS 密钥、密码或完整会话 Cookie。
-- 会话文件默认保存到 `~/.codex/aigc-shelf-session.json`，脚本设置为仅当前用户可读；发现权限异常时提醒用户，不复制到仓库。
+- 会话默认保存到 `~/.config/aigc-workbench/aigc-shelf-session.json`，权限 0600；可用 `AIGC_SHELF_COOKIE_FILE` 或 `AIGC_WORKBENCH_STATE_DIR` 指定，兼容 MiniMax 旧会话。配置与依赖见 [跨 Agent 配置](references/runtime.md)，无需 Codex 目录或 requests。
 - 默认单文件限制 2 GB，服务端负责生成视频封面、识别时长和写入数据库。
 - 不新建数据库表，不修改素材类型字段，不删除角色设定里的正脸、场景照和动作照。
+
+## API 与机器校验
+
+上传、整理、视频导入共用 [API 字段契约](references/asset-api.md)。技能上传发送 `curated-v1` 策略，标题 1–32 字、不含 `·`/`.`，标签 3–5 个；默认「待整理」不能通过上传校验，须先按画面完成命名。文件夹从服务端读取，服务端未升级时兼容旧列表。详情用 `get_asset(id)` 回读，tags 按集合比较；`check-hashes` 返回键为 `assets`。角色候选可在 manifest 中填 `characterCandidates`，只有证据充分时标为 confirmed。
