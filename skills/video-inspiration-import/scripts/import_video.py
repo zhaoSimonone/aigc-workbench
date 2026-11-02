@@ -26,6 +26,7 @@ CLIPDOCK_PROFILE = HOME / "Library/Application Support/ClipDock/InstagramChromeP
 FORMAT = "bv*+ba/b"
 SORT = "res,fps,br"
 MAX_BYTES = 2 * 1024**3
+DELIVERY_VERSION = 1
 
 
 def read_json(path):
@@ -140,9 +141,77 @@ def probe(path):
     return {
         "width": video["width"], "height": video["height"], "duration": duration,
         "videoCodec": video.get("codec_name"),
+        "pixelFormat": video.get("pix_fmt"),
+        "colorTransfer": video.get("color_transfer"),
+        "frameRate": video.get("avg_frame_rate"),
+        "videoBitRate": video.get("bit_rate"),
         "audioCodecs": [s.get("codec_name") for s in data["streams"] if s.get("codec_type") == "audio"],
         "bytes": Path(path).stat().st_size,
     }
+
+
+def compatible(media):
+    return (media["videoCodec"] == "h264" and media.get("pixelFormat") == "yuv420p"
+            and all(codec == "aac" for codec in media["audioCodecs"]))
+
+
+def full_decode(path):
+    run([
+        tool("ffmpeg"), "-hide_banner", "-v", "error", "-xerror",
+        "-err_detect", "explode", "-i", str(path),
+        "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-",
+    ], 1800)
+
+
+def delivery_copy(path, media, output):
+    """Keep the best downloaded stream; derive a separate SDR playback copy."""
+    full_decode(path)
+    if compatible(media):
+        return path, media
+    if media.get("colorTransfer") in ("smpte2084", "arib-std-b67"):
+        raise ValueError("HDR source needs an explicit tone-mapping policy; refusing an SDR conversion")
+    if media["width"] % 2 or media["height"] % 2:
+        raise ValueError("Odd video dimensions need explicit handling for H.264 yuv420p")
+    video_copy = media["videoCodec"] == "h264" and media.get("pixelFormat") == "yuv420p"
+    command = [
+        tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-n",
+        "-xerror", "-err_detect", "explode", "-i", str(path),
+        "-map", "0:v:0", "-map", "0:a?",
+    ]
+    command += (["-c:v", "copy"] if video_copy else [
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-fps_mode", "passthrough",
+    ])
+    command += (["-c:a", "copy"] if all(c == "aac" for c in media["audioCodecs"])
+                else ["-c:a", "aac", "-b:a", "192k"])
+    command += ["-movflags", "+faststart", str(output)]
+    run(command, 1800)
+    converted = probe(output)
+    if (not compatible(converted)
+            or (converted["width"], converted["height"]) != (media["width"], media["height"])
+            or len(converted["audioCodecs"]) != len(media["audioCodecs"])
+            or abs(converted["duration"] - media["duration"]) > 0.25):
+        raise ValueError("Playback conversion changed dimensions, audio tracks or duration")
+    full_decode(output)
+    return output, converted
+
+
+def publish_delivery(state, directory, staging):
+    source = Path(state["path"])
+    media = probe(source)
+    output, delivered = delivery_copy(source, media, staging / "compatible.mp4")
+    state = dict(state)
+    if output != source:
+        # A new name preserves both the original and any previously referenced file.
+        checksum = digest(output)
+        destination = directory / f"media-compatible-{checksum[:12]}.mp4"
+        output.replace(destination)
+        state.update(sourcePath=str(source), sourceSha256=digest(source), sourceMedia=media,
+                     path=str(destination), sha256=checksum)
+    state.update(media=delivered, deliveryVersion=DELIVERY_VERSION,
+                 deliveryPolicy="H.264 yuv420p/AAC; original retained when conversion is needed",
+                 fullDecodeVerified=True)
+    return state
 
 
 def preview(path, media, directory):
@@ -279,6 +348,10 @@ def prepare_one(raw, args):
         if (not getattr(args, "refresh_download", False)
                 and cached.is_file() and state.get("sha256") == digest(cached)):
             log(f"{platform}/{video_id}: reusing verified download")
+            if state.get("deliveryVersion") != DELIVERY_VERSION:
+                with tempfile.TemporaryDirectory(prefix="compatibility-", dir=directory) as temp:
+                    state = publish_delivery(state, directory, Path(temp))
+                write_json(state_file, state)
         else:
             state = {}
             errors = []
@@ -309,16 +382,27 @@ def prepare_one(raw, args):
                             raise ValueError("Source has audio but downloaded file does not")
                         if platform == "tiktok" and metadata.get("remoteId", video_id) != video_id:
                             raise ValueError("Downloaded TikTok ID does not match the requested video")
-                        sheet = preview(path, media, attempt)
-                        final_path = directory / path.name
-                        path.replace(final_path)
+                        delivered, delivery_media = delivery_copy(path, media, attempt / "compatible.mp4")
+                        sheet = preview(delivered, delivery_media, attempt)
+                        checksum = digest(delivered)
+                        final_path = directory / f"media-{checksum[:12]}.mp4"
+                        source_info = {}
+                        if delivered != path:
+                            source_hash = digest(path)
+                            source_path = directory / f"source-{source_hash[:12]}.mp4"
+                            path.replace(source_path)
+                            source_info = {"sourcePath": str(source_path), "sourceSha256": source_hash,
+                                           "sourceMedia": media}
+                        delivered.replace(final_path)
                         for frame in attempt.glob("preview*.jpg"):
                             frame.replace(directory / frame.name)
                         state = {
                             "platform": platform, "videoId": video_id, "canonicalUrl": canonical,
                             "sourceUrl": raw, "path": str(final_path),
-                            "sha256": digest(final_path), "media": media,
-                            "preview": str(directory / Path(sheet).name), **metadata,
+                            "sha256": checksum, "media": delivery_media,
+                            "preview": str(directory / Path(sheet).name), **metadata, **source_info,
+                            "deliveryVersion": DELIVERY_VERSION, "fullDecodeVerified": True,
+                            "deliveryPolicy": "H.264 yuv420p/AAC; original retained when conversion is needed",
                         }
                     write_json(state_file, state)
                     break
@@ -375,6 +459,8 @@ def validate_item(item):
         raise ValueError("Manifest path differs from the prepared download")
     if digest(path) != state["sha256"] or item.get("sha256") != state["sha256"]:
         raise ValueError("Video changed after preparation; prepare it again")
+    if state.get("deliveryVersion") != DELIVERY_VERSION or not compatible(probe(path)):
+        raise ValueError("Prepare this video again to validate playback compatibility before upload")
     name = item.get("name", "").strip()
     tags = item.get("tags", [])
     if not name or len(name) > 32 or not isinstance(tags, list) or not 1 <= len(tags) <= 5:
@@ -395,8 +481,11 @@ def upload_one(item, client):
     with locked(Path(item["stateFile"]).parent):
         state_file, state, path, metadata = validate_item(item)
         # Always ask the current account: local receipts can be stale or belong to another account.
-        existing = client.find_existing([state["sha256"]])
-        asset = existing.get(state["sha256"])
+        hashes = [state["sha256"]]
+        if state.get("sourceSha256"):
+            hashes.append(state["sourceSha256"])
+        existing = client.find_existing(hashes)
+        asset = next((existing[h] for h in hashes if existing.get(h)), None)
         status = "existing" if asset else "uploaded"
         if not asset:
             # Do not retry this POST blindly. A later invocation checks hashes first.
@@ -455,6 +544,9 @@ def parse_args():
     send.add_argument("--results", type=Path, required=True)
     send.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
     send.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
+    repair = sub.add_parser("repair", help="Create a compatible local MP4, preserving the input")
+    repair.add_argument("--input", type=Path, required=True)
+    repair.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
         if hasattr(args, field):
@@ -464,7 +556,24 @@ def parse_args():
 
 def main():
     args = parse_args()
-    return prepare(args) if args.action == "prepare" else upload(args)
+    if args.action == "prepare":
+        return prepare(args)
+    if args.action == "upload":
+        return upload(args)
+    source, output = args.input.expanduser().resolve(), args.output.expanduser().resolve()
+    if output.exists() or output == source or output.suffix.lower() != ".mp4":
+        raise ValueError("Choose a new .mp4 output path; existing files are never overwritten")
+    media = probe(source)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="repair-", dir=output.parent) as temp:
+        path, delivered = delivery_copy(source, media, Path(temp) / "compatible.mp4")
+        # Exclusive creation also protects against an output created while encoding.
+        with path.open("rb") as reader, output.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+    print(json.dumps({"path": str(output), "sourcePath": str(source),
+                      "sourceMedia": media, "media": delivered,
+                      "fullDecodeVerified": True}, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
