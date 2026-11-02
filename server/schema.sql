@@ -61,6 +61,8 @@ ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_source TEXT NOT NULL DEFAULT '
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_status TEXT NOT NULL DEFAULT '';
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_confidence TEXT NOT NULL DEFAULT '';
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_evidence TEXT NOT NULL DEFAULT '';
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_candidates JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS media_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);

@@ -31,7 +31,7 @@ Use this skill for deterministic, user-directed video masking with an image or a
    python3 scripts/fetch_overlay.py --asset-id <素材 ID>
    ```
 
-   The helper reuses the workbench session (`~/.codex/aigc-shelf-session.json`) and caches files under `~/.config/aigc-workbench/gif/`. It never exposes the session token or COS credentials.
+   Install `aigc-asset-upload` alongside this skill (or set `AIGC_UPLOAD_SCRIPT`). The helper reuses its standard-library HTTP client and the workbench session (`~/.config/aigc-workbench/aigc-shelf-session.json`), including MiniMax legacy-session discovery. `AIGC_WORKBENCH_STATE_DIR` changes the session/cache root; `AIGC_SHELF_COOKIE_FILE` explicitly selects a session. GIF files are cached under `<state-dir>/gif/`. See [portable configuration](../aigc-asset-upload/references/runtime.md). It never exposes the session token or COS credentials.
 
    If `HTTPS_PROXY` is set, the helper tunnels through it with `CONNECT` and still wraps the tunnel in TLS, so it works behind a proxy and needs no environment cleanup. A `400 The plain HTTP request was sent to HTTPS port` response means the proxy path regressed to sending a plaintext request to port 443 — check that the proxy branch picks `HTTPSConnection` + `set_tunnel()` by the **target** scheme, not the proxy's scheme.
 3. **Inspect before editing.** Run `ffprobe` on the video and inspect the overlay dimensions, frame count, frame duration, loop behavior, and whether it already has alpha. Do not assume 30 fps, a 16:9 canvas, or a transparent GIF.

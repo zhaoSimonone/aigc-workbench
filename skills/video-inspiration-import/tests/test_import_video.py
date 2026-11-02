@@ -26,6 +26,9 @@ class FakeClient:
     def find_existing(self, hashes):
         return {key: self.assets[key] for key in hashes if key in self.assets}
 
+    def get_asset(self, asset_id):
+        return next(asset for asset in self.assets.values() if asset["id"] == asset_id)
+
     def upload(self, path, metadata):
         self.posts += 1
         asset = {"id": "asset-1", **metadata}
@@ -77,7 +80,7 @@ class WorkflowTests(unittest.TestCase):
     def prepare_item(self):
         with patch.object(workflow, "download_ytdlp", side_effect=self.fake_download):
             item = workflow.prepare_one(URL, self.args)
-        item.update(name="测试视频", tags=["舞蹈"])
+        item.update(name="测试视频", tags=["舞蹈", "红裙", "室内"])
         return item
 
     def test_link_normalization_and_host_validation(self):
@@ -144,7 +147,7 @@ class WorkflowTests(unittest.TestCase):
             item = workflow.prepare_one(URL, self.args)
         self.assertTrue(workflow.compatible(item["media"]))
         self.assertEqual(workflow.digest(old["path"]), old["sha256"])
-        item.update(name="测试视频", tags=["舞蹈"])
+        item.update(name="测试视频", tags=["舞蹈", "红裙", "室内"])
         client = FakeClient()
         client.assets[old["sha256"]] = {"id": "previous-vp9"}
         result = workflow.upload_one(item, client)
@@ -245,6 +248,56 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed"):
             workflow.upload_one(item, client)
         self.assertEqual(client.posts, 0)
+
+    def test_verification_reports_audio_and_decode_failure(self):
+        report = workflow.verify_media(self.video)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["decode"]["errorCount"], 0)
+        self.assertEqual(report["audio"][0]["codec_name"], "aac")
+        self.assertIsNotNone(report["audio"][0]["meanVolumeDb"])
+        corrupt = self.root / "broken.mp4"
+        corrupt.write_bytes(b"not a video")
+        failed = workflow.verify_media(corrupt)
+        self.assertFalse(failed["passed"])
+        self.assertTrue(failed["errors"])
+
+    def test_silence_is_reported_as_warning(self):
+        silent = self.root / "silent.mp4"
+        workflow.run([workflow.tool("ffmpeg"), "-v", "error", "-i", str(self.video),
+                      "-af", "volume=0", "-c:v", "copy", str(silent)])
+        report = workflow.verify_media(silent)
+        self.assertTrue(report["passed"])
+        self.assertGreaterEqual(report["audio"][0]["silenceSegmentCount"], 1)
+        self.assertTrue(report["warnings"])
+
+    def test_preview_cleanup_preserves_other_files_and_regenerates(self):
+        item = self.prepare_item()
+        preview_dir = Path(item["preview"]).parent
+        extra = preview_dir / "user-frame.jpg"
+        extra.write_bytes(b"keep")
+        workflow.upload_one(item, FakeClient())
+        self.assertFalse(Path(item["preview"]).exists())
+        self.assertTrue(extra.exists())
+        with patch.object(workflow, "download_ytdlp", side_effect=AssertionError("cache")):
+            again = workflow.prepare_one(URL, self.args)
+        self.assertTrue(Path(again["preview"]).exists())
+
+    def test_refresh_updates_receipts_without_touching_media(self):
+        item = self.prepare_item()
+        client = FakeClient()
+        workflow.upload_one(item, client)
+        asset = client.get_asset("asset-1")
+        asset.update(name="服务端新名称", tags=["室内", "红裙", "舞蹈"])
+        workflow.write_json(self.args.report, {"items": [item]})
+        args = argparse.Namespace(manifest=self.args.report, api="http://local", cookie_file="none")
+        uploader = argparse.Namespace(Client=lambda *args: client, DEFAULT_API="", DEFAULT_COOKIE_FILE="")
+        with patch.object(workflow, "load_uploader", return_value=uploader), \
+                patch.object(client, "require", create=True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(workflow.refresh(args), 0)
+        updated = workflow.read_json(args.manifest)["items"][0]
+        self.assertEqual(updated["name"], "服务端新名称")
+        self.assertEqual(workflow.digest(item["path"]), item["sha256"])
+        self.assertEqual(workflow.read_json(item["stateFile"])["asset"]["tags"], asset["tags"])
 
     def test_cached_receipt_does_not_skip_current_account_check(self):
         item = self.prepare_item()

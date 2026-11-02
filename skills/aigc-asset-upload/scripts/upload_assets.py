@@ -2,9 +2,7 @@
 """Stream local image/video files into AIGC Shelf."""
 
 import argparse
-import getpass
 import hashlib
-import http.client
 import json
 import mimetypes
 import os
@@ -12,23 +10,15 @@ from pathlib import Path
 import re
 import shutil
 import sys
-from urllib.parse import urlparse
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shelf_client import Client as ShelfClient, APIError, default_cookie_file, validate_metadata, LEGACY_FOLDERS
 
 DEFAULT_API = "https://aigc.chatcanvas.online"
-DEFAULT_COOKIE_FILE = Path.home() / ".codex" / "aigc-shelf-session.json"
+DEFAULT_COOKIE_FILE = default_cookie_file()
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
-ALLOWED_FOLDERS = [
-    "灵感收集",
-    "我的创作",
-    "角色设定",
-    "项目资料",
-    "服装库",
-    "发型库",
-    "通用片段",
-    "GIF 素材",
-]
+ALLOWED_FOLDERS = list(LEGACY_FOLDERS)
 
 # GIF 是 GIF 素材的默认落点：它唯一的用途就是作为视频上的动态遮挡层。
 # 用户显式指定了文件夹时不覆盖——显式意图永远优先。
@@ -192,109 +182,7 @@ class MultipartBody:
         return bytes(chunks)
 
 
-class Client:
-    def __init__(self, base_url, cookie_file):
-        parsed = urlparse(base_url.rstrip("/"))
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise ValueError("AIGC_SHELF_URL 必须是 HTTP(S) 地址")
-        self.scheme = parsed.scheme
-        self.host = parsed.hostname
-        self.port = parsed.port
-        self.base_path = parsed.path.rstrip("/")
-        self.cookie_file = Path(cookie_file).expanduser()
-        self.cookies = self._load_cookies()
-
-    def _load_cookies(self):
-        try:
-            data = json.loads(self.cookie_file.read_text())
-            return {str(k): str(v) for k, v in data.items()}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_cookies(self):
-        self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cookie_file.write_text(json.dumps(self.cookies))
-        try:
-            self.cookie_file.chmod(0o600)
-        except OSError:
-            pass
-
-    def request(self, method, path, body=None, headers=None):
-        # Check for proxy configuration
-        proxy_url = os.environ.get("HTTPS_PROXY" if self.scheme == "https" else "HTTP_PROXY") or os.environ.get("https_proxy" if self.scheme == "https" else "http_proxy")
-
-        if proxy_url:
-            proxy_parsed = urlparse(proxy_url)
-            proxy_port = proxy_parsed.port or (443 if proxy_parsed.scheme == "https" else 80)
-
-            # Set up proxy authentication if present
-            proxy_headers = {}
-            if proxy_parsed.username and proxy_parsed.password:
-                import base64
-                credentials = f"{proxy_parsed.username}:{proxy_parsed.password}"
-                encoded = base64.b64encode(credentials.encode()).decode()
-                proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
-
-            # 连接类必须按「目标站」的 scheme 选，而不是按代理的 scheme：
-            # 只有 HTTPSConnection 会在 CONNECT 隧道建好后再跟目标站做 TLS，
-            # HTTPConnection 即使 set_tunnel 成功，隧道里走的仍是明文 HTTP，
-            # 目标站会收到 400 The plain HTTP request was sent to HTTPS port。
-            if self.scheme == "https":
-                connection = http.client.HTTPSConnection(proxy_parsed.hostname, proxy_port, timeout=900)
-                connection.set_tunnel(self.host, self.port or 443, headers=proxy_headers)
-                # 认证信息已随 CONNECT 发出，不能再塞进隧道内的请求头
-                proxy_headers = {}
-            else:
-                connection = http.client.HTTPConnection(proxy_parsed.hostname, proxy_port, timeout=900)
-
-            full_path = f"{self.base_path}{path}"
-        else:
-            connection_class = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
-            connection = connection_class(self.host, self.port, timeout=900)
-            full_path = f"{self.base_path}{path}"
-            proxy_headers = {}
-
-        request_headers = {"Accept": "application/json", **proxy_headers, **(headers or {})}
-        if self.cookies:
-            request_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-        connection.request(method, full_path, body=body, headers=request_headers)
-        response = connection.getresponse()
-        payload = response.read()
-        set_cookie = response.headers.get("Set-Cookie")
-        if set_cookie:
-            pair = set_cookie.split(";", 1)[0]
-            if "=" in pair:
-                name, value = pair.split("=", 1)
-                if value:
-                    self.cookies[name] = value
-                else:
-                    self.cookies.pop(name, None)
-            self._save_cookies()
-        connection.close()
-        try:
-            parsed_payload = json.loads(payload.decode("utf-8")) if payload else None
-        except json.JSONDecodeError:
-            parsed_payload = {"raw": payload[:500].decode("utf-8", "replace")}
-        return response.status, parsed_payload
-
-    def ensure_login(self):
-        status, payload = self.request("GET", "/api/auth/me")
-        if status == 200:
-            return payload.get("user", {})
-        email = os.environ.get("AIGC_SHELF_EMAIL") or input("AIGC Shelf 登录邮箱: ").strip()
-        password = os.environ.get("AIGC_SHELF_PASSWORD") or getpass.getpass("AIGC Shelf 登录密码: ")
-        login_body = json.dumps({"email": email, "password": password}).encode()
-        status, payload = self.request(
-            "POST",
-            "/api/auth/login",
-            login_body,
-            {"Content-Type": "application/json", "Content-Length": str(len(login_body))},
-        )
-        if status != 200:
-            error_msg = (payload or {}).get("error", "AIGC Shelf 登录失败")
-            raise RuntimeError(f"登录失败 (HTTP {status}): {error_msg}, 响应: {payload}")
-        return payload.get("user", {})
-
+class Client(ShelfClient):
     def find_existing(self, hashes):
         """Return existing assets keyed by content hash for the signed-in user."""
         hashes = list(dict.fromkeys(hashes))
@@ -310,7 +198,7 @@ class Client:
                 {"Content-Type": "application/json", "Content-Length": str(len(body))},
             )
             if status != 200:
-                raise RuntimeError((payload or {}).get("error", f"去重检查失败 HTTP {status}"))
+                raise APIError(status, payload, self.last_response.get("headers"))
             existing.update({
                 str(asset.get("sha256", "")).lower(): asset
                 for asset in (payload or {}).get("assets", [])
@@ -319,6 +207,11 @@ class Client:
         return existing
 
     def upload(self, file_path, metadata):
+        validate_metadata({"name": metadata.get("name", ""), "tags": metadata.get("tags", [])})
+        policy = self.metadata_policy()
+        folder = policy.get("folderAliases", {}).get(metadata.get("folder"), metadata.get("folder", DEFAULT_FOLDER))
+        if folder not in policy["folders"]:
+            raise ValueError(f"服务端不支持该文件夹：{folder}")
         mime_type, by_extension = sniff_mime_type(file_path)
         mismatch = extension_mismatch(file_path, mime_type)
         if mismatch:
@@ -337,21 +230,25 @@ class Client:
             "sourceUrl": metadata.get("sourceUrl", ""),
             "tags": json.dumps(metadata.get("tags", ["待整理"]), ensure_ascii=False),
             "used": str(bool(metadata.get("used", False))).lower(),
-            "folder": metadata.get("folder", "灵感收集"),
+            "folder": folder,
             "characterName": metadata.get("characterName", ""),
             "characterCategory": metadata.get("characterCategory", ""),
         }
         if metadata.get("parentAssetIds"):
             fields["parentAssetIds"] = json.dumps(metadata["parentAssetIds"])
+        if "characterCandidates" in metadata:
+            fields["characterCandidates"] = json.dumps(metadata["characterCandidates"], ensure_ascii=False)
         body = MultipartBody(file_path, mime_type, fields)
-        status, payload = self.request(
-            "POST",
-            "/api/assets",
-            body,
-            {"Content-Type": body.content_type, "Content-Length": str(body.length)},
-        )
+        try:
+            status, payload = self.request(
+                "POST", "/api/assets", body,
+                {"Content-Type": body.content_type, "Content-Length": str(body.length),
+                 "X-AIGC-Metadata-Policy": "curated-v1"},
+            )
+        finally:
+            body.file.close()
         if status != 201:
-            raise RuntimeError((payload or {}).get("error", f"上传失败 HTTP {status}"))
+            raise APIError(status, payload, self.last_response.get("headers"))
         return payload.get("asset", {})
 
 
@@ -367,7 +264,7 @@ def parse_args():
     parser.add_argument("--source", default="本地导入")
     parser.add_argument("--source-url", default="")
     parser.add_argument("--tags", default="待整理", help="以空格或逗号分隔")
-    parser.add_argument("--folder", default=None, choices=ALLOWED_FOLDERS, help="整批默认文件夹，可被 --manifest 逐文件覆盖；不指定时 GIF 自动进 GIF 素材，其余进 灵感收集")
+    parser.add_argument("--folder", default=None, help="整批默认文件夹，以服务端 metadata-policy 为准")
     parser.add_argument("--manifest", default="", help="逐文件元数据 JSON：{items:[{path,folder,name,tags}]}，路径必须是绝对路径")
     parser.add_argument("--used", action="store_true")
     parser.add_argument("--character-name", default="")
@@ -440,6 +337,8 @@ def load_manifest(manifest_path, files):
             continue
         if tags is not None:
             entry["tags"] = tags
+        if "characterCandidates" in item:
+            entry["characterCandidates"] = item["characterCandidates"]
         for key_name in ("name", "source", "sourceUrl", "characterName", "characterCategory"):
             value = str(item.get(key_name, "") or "").strip()
             if value:
@@ -475,7 +374,7 @@ def resolve_title(file_path, name_map, base_name, total):
     if map_name:
         return map_name
     if base_name:
-        return f"{base_name} · {file_path.stem}" if total > 1 else base_name
+        return f"{base_name}-{file_path.stem}" if total > 1 else base_name
     return file_path.stem
 
 
@@ -647,9 +546,10 @@ def main():
         canonical_files = {os.path.abspath(os.path.expanduser(str(p))) for p in files}
         for path_text in sorted(set(name_map) - canonical_files):
             print(f"提示：名称映射中的路径不在待上传列表：{path_text}", file=sys.stderr)
-    manifest_plan, manifest_errors = load_manifest(args.manifest, files) if args.manifest else ({}, {})
     client = Client(args.api, args.cookie_file)
     user = client.ensure_login()
+    ALLOWED_FOLDERS[:] = client.metadata_policy()["folders"]
+    manifest_plan, manifest_errors = load_manifest(args.manifest, files) if args.manifest else ({}, {})
     print(f"已登录：{user.get('name') or user.get('email') or '当前账号'}")
     tags = split_tags(args.tags)
     failures = 0
@@ -701,6 +601,7 @@ def main():
             "characterName": entry.get("characterName") or args.character_name,
             "characterCategory": entry.get("characterCategory") or args.character_category,
             "parentAssetIds": args.parent_asset_ids,
+            **({"characterCandidates": entry["characterCandidates"]} if "characterCandidates" in entry else {}),
         }
         try:
             asset = client.upload(file_path, metadata)

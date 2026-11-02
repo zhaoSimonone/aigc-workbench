@@ -95,7 +95,7 @@ python3 /path/to/skills/aigc-asset-organize/scripts/organize_assets.py music-lib
 
 整理分为“观察提案”和“写回”两阶段，不能跳过审阅：
 
-1. 为每个候选生成提案 JSON。每项必须包含 `id`、`before`、`after` 和 `reason`；`after` 只放需要变更的字段，字段名使用 API 形式：`name`、`tags`、`note`、`folder`、`characterName`、`characterCategory`、`musicTitle`、`musicArtist`、`musicSource`、`musicStatus`、`musicConfidence`、`musicEvidence`。
+1. 为每个候选生成提案 JSON。每项必须包含 `id`、`before`、`after` 和 `reason`；`after` 只放需要变更的字段。与上传技能共用 [API 字段表](../aigc-asset-upload/references/asset-api.md)，支持标题、标签、备注、来源、角色候选、音乐、favorite/used 与 parentAssetIds；统一使用 `/organize`，标签按集合比较。
 2. 提案中的 `reason` 要引用实际观察证据；音乐提案还要包含置信度和识别依据。没有变化的素材不要生成空更新项。
 
    最小格式示例：`{"items":[{"id":"素材 UUID","before":{"name":"原名","tags":["待整理"]},"after":{"name":"夜街回头转身","tags":["人物","夜景","回头动作"]},"reason":"第 2 秒人物在夜间街道回头，镜头从中景快速推近"}]}`。
@@ -109,8 +109,19 @@ python3 /path/to/skills/aigc-asset-organize/scripts/organize_assets.py music-lib
 4. 得到明确同意后，重复命令并加 `--confirm` 才能写回。脚本会重新读取当前值，若素材在预览后已被别人修改则拒绝该项，避免覆盖新内容；写回使用原子 organize API。
 5. 汇报每项结果：已更新、因无变化跳过、因冲突拒绝或失败。没有 `--confirm` 的运行绝不能声称已完成整理。
 
+也可用直给参数生成同样的 diff，无需手写 JSON：
+
+```bash
+python3 /path/to/skills/aigc-asset-organize/scripts/organize_assets.py apply \
+  --asset-id "<UUID>" --set-name "海贼王-汉库克-舞蹈-红色印花裙" \
+  --set-tags "海贼王,汉库克,舞蹈,红色印花裙" \
+  --reason "片头文字及服装纹样对应角色" --save-plan "/absolute/path/review-plan.json"
+```
+
+默认只预览，`--save-plan` 不覆盖已有文件。用户确认后执行 `apply --plan "/absolute/path/review-plan.json" --confirm`，保持原始 before 快照；服务端也会在事务中检查，返回 409 时重新读取并展示差异。用户已明确指定并授权改动时可直接传 `--confirm`；不要为了命令形式重复索要已有授权。
+
 ## 登录与安全边界
 
-脚本复用 `~/.codex/aigc-shelf-session.json` 的 AIGC Shelf 会话；失效时使用 `AIGC_SHELF_EMAIL`/`AIGC_SHELF_PASSWORD` 或安全提示登录。不要输出密码、Cookie、COS 密钥，也不要下载到仓库或把媒体复制到长期目录。整理是外部状态变更，只能在用户确认 diff 后执行。
+脚本与上传技能同级安装，复用其标准库 HTTP 客户端。会话默认在 `~/.config/aigc-workbench/aigc-shelf-session.json`，可通过 `AIGC_SHELF_COOKIE_FILE` 或 `AIGC_WORKBENCH_STATE_DIR` 指定；自动兼容 MiniMax 运行时。具体路径、工具和环境配置见 [跨 Agent 配置](../aigc-asset-upload/references/runtime.md)。失效时使用 `AIGC_SHELF_EMAIL`/`AIGC_SHELF_PASSWORD` 或安全提示登录。不要输出密码、Cookie、COS 密钥，也不要下载到仓库或把媒体复制到长期目录。整理写回遵循用户对具体改动的授权。
 
 脚本默认使用 `https://aigc.chatcanvas.online`，可用 `AIGC_SHELF_URL` 或 `--api` 覆盖。
