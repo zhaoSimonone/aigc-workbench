@@ -65,6 +65,7 @@ ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_candidates JSONB NOT NULL 
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS media_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS assets_user_live_page_idx ON assets(user_id, created_at DESC, id DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS assets_user_folder_idx ON assets(user_id, folder);
 CREATE INDEX IF NOT EXISTS assets_user_sha256_idx ON assets(user_id, sha256) WHERE sha256 IS NOT NULL AND deleted_at IS NULL;
 
@@ -320,6 +321,7 @@ CREATE TABLE IF NOT EXISTS asset_tags (
   tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   PRIMARY KEY(asset_id, tag_id)
 );
+CREATE INDEX IF NOT EXISTS asset_tags_tag_asset_idx ON asset_tags(tag_id, asset_id);
 
 CREATE TABLE IF NOT EXISTS asset_relations (
   source_asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
