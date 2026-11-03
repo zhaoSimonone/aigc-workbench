@@ -479,8 +479,7 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
         await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, userId]);
       }
       await client.query('COMMIT');
-      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
-      return await hydrateAsset(hydrated.rows[0]);
+      return await hydrateAsset(await assetQuery(rows[0].id, userId, false, client));
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -536,8 +535,7 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
         await client.query('INSERT INTO asset_relations(source_asset_id,derived_asset_id) SELECT id,$1 FROM assets WHERE id=$2 AND user_id=$3 ON CONFLICT DO NOTHING', [rows[0].id, parentId, userId]);
       }
       await client.query('COMMIT');
-      const hydrated = await pool.query(`SELECT a.*, COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags, COALESCE(array_agg(DISTINCT r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids, COALESCE(array_agg(DISTINCT d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids FROM assets a LEFT JOIN asset_tags at ON at.asset_id=a.id LEFT JOIN tags t ON t.id=at.tag_id LEFT JOIN asset_relations r ON r.derived_asset_id=a.id LEFT JOIN asset_relations d ON d.source_asset_id=a.id WHERE a.id=$1 GROUP BY a.id`, [rows[0].id]);
-      return await hydrateAsset(hydrated.rows[0]);
+      return await hydrateAsset(await assetQuery(rows[0].id, userId, false, client));
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -600,18 +598,15 @@ async function hydrateAsset(row) {
   };
 }
 
-async function assetQuery(id, userId) {
-  const result = await pool.query(
-    `SELECT a.*, COALESCE(array_agg(DISTINCT t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
-        COALESCE(array_agg(DISTINCT r.source_asset_id ORDER BY r.source_asset_id) FILTER (WHERE r.source_asset_id IS NOT NULL), '{}') AS parent_asset_ids,
-        COALESCE(array_agg(DISTINCT d.derived_asset_id ORDER BY d.derived_asset_id) FILTER (WHERE d.derived_asset_id IS NOT NULL), '{}') AS derived_asset_ids
-       FROM assets a
-       LEFT JOIN asset_tags at ON at.asset_id=a.id
-       LEFT JOIN tags t ON t.id=at.tag_id
-       LEFT JOIN asset_relations r ON r.derived_asset_id=a.id
-       LEFT JOIN asset_relations d ON d.source_asset_id=a.id
-      WHERE a.id=$1 AND a.user_id=$2 AND a.deleted_at IS NULL
-      GROUP BY a.id`,
+async function assetQuery(id, userId, mediaOnly = false, connection = pool) {
+  // Independent indexed aggregates avoid tags x parents x children intermediate rows.
+  const columns = mediaOnly ? 'a.id,a.name,a.type,a.content_type,a.object_key' : `a.*,
+    ARRAY(SELECT t.name FROM asset_tags at JOIN tags t ON t.id=at.tag_id WHERE at.asset_id=a.id ORDER BY t.name) AS tags,
+    ARRAY(SELECT r.source_asset_id FROM asset_relations r WHERE r.derived_asset_id=a.id ORDER BY r.source_asset_id) AS parent_asset_ids,
+    ARRAY(SELECT d.derived_asset_id FROM asset_relations d WHERE d.source_asset_id=a.id ORDER BY d.derived_asset_id) AS derived_asset_ids`;
+  const result = await connection.query(
+    `SELECT ${columns} FROM assets a
+      WHERE a.id=$1 AND a.user_id=$2 AND a.deleted_at IS NULL`,
     [id, userId],
   );
   return result.rows[0];
@@ -628,6 +623,10 @@ function formatDuration(seconds) {
   const total = Math.max(0, Math.round(Number(seconds)));
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
+
+require('./asset-browser').registerAssetBrowser(app, {
+  pool, requireUser, stableSignedUrl, formatBytes, formatDuration,
+});
 
 app.get('/api/health', async (_req, res) => {
   try {
@@ -1111,7 +1110,7 @@ app.post('/api/prompts', requireUser, async (req, res, next) => {
       );
       await replacePromptLinks(client, rows[0].id, req.user.id, links);
       await client.query('COMMIT');
-      const prompt = await promptQuery(rows[0].id, req.user.id);
+      const prompt = await promptQuery(rows[0].id, req.user.id, client);
       res.status(201).json({ prompt: publicPrompt(prompt) });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1164,7 +1163,7 @@ app.patch('/api/prompts/:id', requireUser, async (req, res, next) => {
         await replacePromptLinks(client, existing.id, req.user.id, normalisePromptLinks(req.body.assetLinks));
       }
       await client.query('COMMIT');
-      const prompt = await promptQuery(existing.id, req.user.id);
+      const prompt = await promptQuery(existing.id, req.user.id, client);
       res.json({ prompt: publicPrompt(prompt) });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -1390,7 +1389,7 @@ app.get('/api/assets/:id', requireUser, async (req, res, next) => {
 
 app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
   try {
-    const row = await assetQuery(req.params.id, req.user.id);
+    const row = await assetQuery(req.params.id, req.user.id, true);
     if (!row) return res.status(404).json({ error: '素材不存在' });
     if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
 
@@ -1405,7 +1404,7 @@ app.get('/api/assets/:id/stream', requireUser, async (req, res, next) => {
 
 app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
   try {
-    const row = await assetQuery(req.params.id, req.user.id);
+    const row = await assetQuery(req.params.id, req.user.id, true);
     if (!row) return res.status(404).json({ error: '素材不存在' });
     if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
     const filename = downloadFilename(row);
@@ -1433,7 +1432,7 @@ app.get('/api/assets/:id/download', requireUser, async (req, res, next) => {
 
 app.get('/api/assets/:id/download-url', requireUser, async (req, res, next) => {
   try {
-    const row = await assetQuery(req.params.id, req.user.id);
+    const row = await assetQuery(req.params.id, req.user.id, true);
     if (!row) return res.status(404).json({ error: '素材不存在' });
     if (!row.object_key) return res.status(404).json({ error: '素材文件不存在' });
     const filename = downloadFilename(row);
@@ -2072,7 +2071,7 @@ async function organizeAsset(req, res, next) {
         return res.status(400).json({ error: '没有可更新字段' });
       }
       await client.query('COMMIT');
-      const hydrated = await assetQuery(req.params.id, req.user.id);
+      const hydrated = await assetQuery(req.params.id, req.user.id, false, client);
       res.json({ asset: await hydrateAsset(hydrated) });
     } catch (error) {
       await client.query('ROLLBACK');

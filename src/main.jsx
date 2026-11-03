@@ -53,6 +53,7 @@ import {
   Info,
 } from "lucide-react";
 import ArchivePanel from "./archive-panel.jsx";
+import { useAssetPage, useAssetsById, useDebounced, RemoteAssetPicker, AssetPageControls } from "./asset-browser.jsx";
 import "./styles.css";
 
 const media = "/media/";
@@ -384,25 +385,8 @@ function clearSessionCache() {
   }
 }
 
-function assetCacheKey(userId) {
-  return `aigc-shelf:assets:v1:${userId}`;
-}
-
-function readAssetCache(userId) {
-  try {
-    const cached = JSON.parse(sessionStorage.getItem(assetCacheKey(userId)) || "null");
-    return Array.isArray(cached?.assets) ? cached.assets : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeAssetCache(userId, assets) {
-  try {
-    sessionStorage.setItem(assetCacheKey(userId), JSON.stringify({ assets }));
-  } catch {
-    // 缓存仅用于加速首屏；空间不足或隐私模式下不可用时不影响正常加载。
-  }
+function AssetPicker(props) {
+  return <RemoteAssetPicker apiFetch={apiFetch} {...props} />;
 }
 
 function normaliseAsset(asset) {
@@ -629,15 +613,13 @@ function AuthScreen({ onAuth }) {
 }
 
 function Workspace({ user, onLogout }) {
-  // 刷新时先展示当前用户上一次成功加载的素材快照，再后台拉取最新数据。
-  // 这不会替代服务端请求，只是把“空白加载态”变成 stale-while-revalidate。
-  const [cachedAssetRows] = useState(() => readAssetCache(user.id));
-  const [assets, setAssets] = useState(() => (cachedAssetRows || []).map(normaliseAsset));
   const [characterAlbums, setCharacterAlbums] = useState([]);
+  const [summary, setSummary] = useState({ counts: {}, folders: {}, tags: [], characters: [] });
+  const [revision, setRevision] = useState(0);
+  const refreshBrowser = () => setRevision((n) => n + 1);
   const [videoAccounts, setVideoAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [musicTracks, setMusicTracks] = useState([]);
-  const [loadingAssets, setLoadingAssets] = useState(() => !cachedAssetRows);
   const [loadingVideoAccounts, setLoadingVideoAccounts] = useState(true);
   const [loadingPrompts, setLoadingPrompts] = useState(true);
   const [loadingMusicTracks, setLoadingMusicTracks] = useState(true);
@@ -673,7 +655,15 @@ function Workspace({ user, onLogout }) {
   const [sortOpen, setSortOpen] = useState(false);
   const [sort, setSort] = useState("最近添加");
   const [view, setView] = useState("grid");
-  const [visibleAssetLimit, setVisibleAssetLimit] = useState(60);
+  const settledQuery = useDebounced(query);
+  const assetView = !["提示词库", "视频账号", "音乐库", "工作文档"].includes(activeFolder);
+  const page = useAssetPage(apiFetch, normaliseAsset, {
+    folder: activeFolder, character: activeCharacter || undefined, category: activeCharacterCategory,
+    filter: activeFilter, type: activeFilter === "视频" ? "video" : activeFilter === "图片" ? "image" : undefined,
+    tag: activeTag, q: settledQuery, sort,
+    mode: activeFolder === "角色设定" && !activeCharacter ? "albums" : undefined,
+  }, revision, assetView);
+  const { assets, setAssets, loading: loadingAssets } = page;
   const fileInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -684,69 +674,43 @@ function Workspace({ user, onLogout }) {
   };
 
   useEffect(() => {
-    let mounted = true;
-    const reportError = (label, error) => {
-      if (mounted) setLoadError(`${label}加载失败：${error.message}`);
+    const controller = new AbortController();
+    apiFetch("/asset-browser/summary", { signal: controller.signal }).then((payload) => {
+      if (!controller.signal.aborted) {
+        setSummary(payload);
+        setCharacterAlbums(payload.albums || []);
+      }
+    }).catch((error) => {
+      if (!controller.signal.aborted) setLoadError(`统计加载失败：${error.message}`);
+    });
+    return () => controller.abort();
+  }, [revision]);
+
+  useEffect(() => {
+    try { sessionStorage.removeItem(`aigc-shelf:assets:v1:${user.id}`); } catch {}
+  }, [user.id]);
+
+  useEffect(() => {
+    const libraries = {
+      "视频账号": ["/video-accounts", "accounts", setVideoAccounts, setLoadingVideoAccounts],
+      "提示词库": ["/prompts", "prompts", setPrompts, setLoadingPrompts],
+      "音乐库": ["/music-tracks", "tracks", setMusicTracks, setLoadingMusicTracks],
     };
-
-    // 素材列表是首屏主内容，单独完成加载，不能被提示词、音乐库等次要接口阻塞。
-    apiFetch("/assets")
-      .then((payload) => {
-        const rows = payload.assets || [];
-        writeAssetCache(user.id, rows);
-        if (mounted) setAssets(rows.map(normaliseAsset));
-      })
-      .catch((error) => {
-        if (!cachedAssetRows) reportError("素材", error);
-      })
-      .finally(() => {
-        if (mounted) setLoadingAssets(false);
-      });
-
-    apiFetch("/character-albums")
-      .then((payload) => {
-        if (mounted) setCharacterAlbums(payload.albums || []);
-      })
-      .catch((error) => reportError("角色相册", error));
-
-    apiFetch("/video-accounts")
-      .then((payload) => {
-        if (mounted) setVideoAccounts(payload.accounts || []);
-      })
-      .catch((error) => reportError("视频账号", error))
-      .finally(() => {
-        if (mounted) setLoadingVideoAccounts(false);
-      });
-
-    apiFetch("/prompts")
-      .then((payload) => {
-        if (mounted) setPrompts(payload.prompts || []);
-      })
-      .catch((error) => reportError("提示词库", error))
-      .finally(() => {
-        if (mounted) setLoadingPrompts(false);
-      });
-
-    apiFetch("/music-tracks")
-      .then((payload) => {
-        if (mounted) setMusicTracks(payload.tracks || []);
-      })
-      .catch(() => {
-        // 音乐库是可选数据，接口失败时不阻塞其他首屏内容。
-        if (mounted) setMusicTracks([]);
-      })
-      .finally(() => {
-        if (mounted) setLoadingMusicTracks(false);
-      });
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    const library = libraries[activeFolder];
+    if (!library) return;
+    const [url, field, setRows, setLoading] = library;
+    const controller = new AbortController();
+    setLoading(true);
+    apiFetch(url, { signal: controller.signal })
+      .then((payload) => { if (!controller.signal.aborted) setRows(payload[field] || []); })
+      .catch((error) => { if (!controller.signal.aborted) setLoadError(error.message); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [activeFolder]);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refreshMusicTracks();
+      if (document.visibilityState === "visible" && activeFolder === "音乐库") refreshMusicTracks();
     };
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -754,7 +718,7 @@ function Workspace({ user, onLogout }) {
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, []);
+  }, [activeFolder]);
 
   // 地址栏与当前视图双向同步：切换页签/筛选更新路径；浏览器前进/后退切换视图
   useEffect(() => {
@@ -782,137 +746,58 @@ function Workspace({ user, onLogout }) {
 
   const folderItems = useMemo(
     () => [
-      { label: "全部素材", count: assets.length, icon: LayoutGrid },
+      { label: "全部素材", count: summary.counts.total || 0, icon: LayoutGrid },
       {
         label: "灵感收集",
-        count: assets.filter((item) => item.folder === "灵感收集").length,
+        count: summary.folders["灵感收集"] || 0,
         icon: Sparkles,
       },
       {
         label: "我的创作",
-        count: assets.filter((item) => item.folder === "我的创作" || item.folder === "成片").length,
+        count: (summary.folders["我的创作"] || 0) + (summary.folders["成片"] || 0),
         icon: Play,
       },
       {
         label: "角色设定",
-        count: assets.filter((item) => isCharacterAlbumAsset(item)).length,
+        count: summary.roles || 0,
         icon: FileImage,
       },
       {
         label: "服装库",
-        count: assets.filter((item) => item.folder === "服装库").length,
+        count: summary.folders["服装库"] || 0,
         icon: Shirt,
       },
       {
         label: "发型库",
-        count: assets.filter((item) => item.folder === "发型库").length,
+        count: summary.folders["发型库"] || 0,
         icon: Scissors,
       },
       {
         label: "通用片段",
-        count: assets.filter((item) => item.folder === "通用片段").length,
+        count: summary.folders["通用片段"] || 0,
         icon: Clapperboard,
       },
       {
         label: "GIF 素材",
-        count: assets.filter((item) => item.folder === "GIF 素材").length,
+        count: summary.folders["GIF 素材"] || 0,
         icon: Sticker,
       },
       {
         label: "项目资料",
-        count: assets.filter((item) => item.folder === "项目资料").length,
+        count: summary.folders["项目资料"] || 0,
         icon: Archive,
       },
-      { label: "提示词库", count: prompts.length, icon: FileText },
-      { label: "视频账号", count: videoAccounts.length, icon: Users },
-      { label: "音乐库", count: musicTracks.length, icon: Music2 },
+      { label: "提示词库", count: summary.prompts || 0, icon: FileText },
+      { label: "视频账号", count: summary.accounts || 0, icon: Users },
+      { label: "音乐库", count: summary.music || 0, icon: Music2 },
       { label: "工作文档", icon: FolderOpen },
     ],
-    [assets, prompts, videoAccounts, musicTracks],
+    [summary],
   );
-  const filteredAssets = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    const result = assets.filter((asset) => {
-      const inFolder =
-        activeFolder === "全部素材" ||
-        (activeFolder === "我的创作"
-          ? (asset.folder === "我的创作" || asset.folder === "成片")
-          : activeFolder === "角色设定"
-            ? isCharacterAlbumAsset(asset)
-            : asset.folder === activeFolder);
-      const inCharacter =
-        activeFolder !== "角色设定" ||
-        !activeCharacter ||
-        (activeCharacter === "待归类人物" || activeCharacter === "未命名角色" ? !asset.characterName : asset.characterName === activeCharacter);
-      const inCharacterCategory =
-        activeFolder !== "角色设定" || !activeCharacterCategory || albumCategory(asset) === activeCharacterCategory;
-      const inType =
-        activeFilter === "全部" ||
-        (activeFilter === "视频" && asset.type === "video") ||
-        (activeFilter === "图片" && asset.type === "image") ||
-        (activeFilter === "已收藏" && asset.favorite) ||
-        (activeFilter === "已使用" && asset.used);
-      const inTag = !activeTag || asset.tags.includes(activeTag);
-      const inSearch =
-        !normalized ||
-        `${asset.name} ${asset.source} ${asset.tags.join(" ")} ${asset.musicTitle || ""} ${asset.musicArtist || ""} ${asset.musicStatus || ""}`
-          .toLowerCase()
-          .includes(normalized);
-      return inFolder && inCharacter && inCharacterCategory && inType && inTag && inSearch;
-    });
-    return [...result].sort((a, b) =>
-      sort === "名称"
-        ? a.name.localeCompare(b.name, "zh")
-        : new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
-    );
-  }, [assets, activeFolder, activeCharacter, activeCharacterCategory, activeFilter, activeTag, query, sort]);
-  useEffect(() => {
-    setVisibleAssetLimit(60);
-  }, [activeFolder, activeCharacter, activeCharacterCategory, activeFilter, activeTag, query, sort, view]);
-  const displayedAssets = query.trim() ? filteredAssets : filteredAssets.slice(0, visibleAssetLimit);
-  const tagOptions = useMemo(
-    () =>
-      [...new Set(assets.flatMap((asset) => asset.tags))].sort((a, b) =>
-        a.localeCompare(b, "zh"),
-      ),
-    [assets],
-  );
-  const roleAlbums = useMemo(() => {
-    if (activeFolder !== "角色设定" || activeCharacter) return [];
-    const albumMeta = new Map();
-    characterAlbums.forEach((album) => albumMeta.set(album.name, album));
-    const groups = new Map();
-    characterAlbums.forEach((album) => groups.set(album.name, { name: album.name, assets: [] }));
-    filteredAssets.forEach((asset) => {
-      const name = asset.characterName || "待归类人物";
-      const existing = groups.get(name) || { name, assets: [] };
-      existing.assets.push(asset);
-      groups.set(name, existing);
-    });
-    return [...groups.values()]
-      .map((group) => {
-        const meta = albumMeta.get(group.name);
-        const fixedCover = meta?.coverAssetId && meta.cover ? (meta.cover.thumb || meta.cover.src || "") : "";
-        return {
-          ...group,
-          count: group.assets.length,
-          cover: fixedCover
-            || group.assets.find((asset) => asset.thumb || asset.src)?.thumb
-            || group.assets.find((asset) => asset.src)?.src
-            || "",
-          albumId: meta && !String(meta.id).startsWith("local-") ? meta.id : null,
-          coverAssetId: meta?.coverAssetId || null,
-          videoCount: group.assets.filter((asset) => asset.type === "video").length,
-          imageCount: group.assets.filter((asset) => asset.type === "image").length,
-          categoryCounts: group.assets.reduce((counts, asset) => {
-            const category = albumCategory(asset) || "未分类";
-            counts[category] = (counts[category] || 0) + 1;
-            return counts;
-          }, {}),
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name, "zh"));
-  }, [filteredAssets, characterAlbums, activeFolder, activeCharacter]);
+  const filteredAssets = assets;
+  const displayedAssets = assets;
+  const tagOptions = summary.tags;
+  const roleAlbums = page.albums;
   const visibleVideoAccounts = useMemo(() => {
     const query = accountQuery.trim().toLowerCase();
     if (!query) return videoAccounts;
@@ -930,33 +815,42 @@ function Workspace({ user, onLogout }) {
       setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
       setSelected((item) => (item?.id === id ? updated : item));
       setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
+      refreshBrowser();
     } catch (error) {
       setLoadError(error.message);
     }
   };
-  const openAsset = (asset) => {
-    setDetailTrail([]);
-    setSelected(asset);
-  };
-    const openAssetById = (assetId) => {
-    const asset = assets.find((item) => item.id === assetId);
-    if (!asset) {
-      setLoadError("对应素材不存在，可能已被删除");
-      return;
+  const detailRequest = useRef(0);
+  const [openingDetail, setOpeningDetail] = useState(false);
+  const openAsset = async (asset, related = false) => {
+    const request = ++detailRequest.current;
+    setOpeningDetail(true);
+    try {
+      const payload = await apiFetch(`/assets/${asset.id}`);
+      if (request !== detailRequest.current) return;
+      setDetailTrail((trail) => related && selected ? [...trail, selected] : []);
+      setSelected(normaliseAsset(payload.asset));
+    } catch (error) {
+      if (request === detailRequest.current) setLoadError(error.message);
+    } finally {
+      if (request === detailRequest.current) setOpeningDetail(false);
     }
+  };
+  const openAssetById = (assetId) => {
     setActiveFolder("全部素材");
     setActiveCharacter("");
     setActiveCharacterCategory("");
     setActiveFilter("全部");
-    openAsset(asset);
+    openAsset({ id: assetId });
   };
   const openRelatedAsset = (asset) => {
-    setDetailTrail((trail) => (selected ? [...trail, selected] : trail));
-    setSelected(asset);
+    openAsset(asset, true);
   };
   const backToPreviousAsset = () => {
     const previous = detailTrail[detailTrail.length - 1];
     if (!previous) return;
+    detailRequest.current++;
+    setOpeningDetail(false);
     setDetailTrail((trail) => trail.slice(0, -1));
     setSelected(previous);
   };
@@ -1049,6 +943,7 @@ function Workspace({ user, onLogout }) {
     } catch (error) {
       setLoadError(error.message);
     } finally {
+      refreshBrowser();
       setUploading(false);
       setUploadProgress(null);
     }
@@ -1059,6 +954,7 @@ function Workspace({ user, onLogout }) {
       body: JSON.stringify({ name }),
     });
     setCharacterAlbums((albums) => [...albums, payload.album]);
+    refreshBrowser();
     setActiveFolder("角色设定");
     setActiveCharacter(payload.album.name);
     setActiveCharacterCategory("");
@@ -1089,6 +985,7 @@ function Workspace({ user, onLogout }) {
       body: JSON.stringify({ coverAssetId }),
     });
     setCharacterAlbums((albums) => albums.map((item) => (item.id === payload.album.id ? payload.album : item)));
+    refreshBrowser();
   };
   const downloadAsset = async (asset) => {
     if (WECHAT_UA.test(navigator.userAgent)) {
@@ -1165,10 +1062,9 @@ function Workspace({ user, onLogout }) {
           body: JSON.stringify({ tags }),
         });
       }
-      const payload = await apiFetch("/assets");
-      const nextAssets = (payload.assets || []).map(normaliseAsset);
-      setAssets(nextAssets);
-      setSelected(nextAssets.find((item) => item.id === id) || null);
+      const payload = await apiFetch(`/assets/${id}`);
+      setSelected(normaliseAsset(payload.asset));
+      refreshBrowser();
       setEditingAsset(null);
     } catch (error) {
       throw error;
@@ -1210,6 +1106,7 @@ function Workspace({ user, onLogout }) {
       setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
       setSelected((item) => (item?.id === id ? updated : item));
       setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
+      refreshBrowser();
       return updated;
     } catch (error) {
       setLoadError(error.message);
@@ -1222,6 +1119,7 @@ function Workspace({ user, onLogout }) {
       setAssets((items) => items.filter((item) => item.id !== id));
       setSelected(null);
       setDetailTrail([]);
+      refreshBrowser();
     } catch (error) {
       setLoadError(error.message);
     }
@@ -1238,12 +1136,14 @@ function Workspace({ user, onLogout }) {
     }
     setShowVideoAccountModal(false);
     setEditingVideoAccount(null);
+    refreshBrowser();
   };
   const deleteVideoAccount = async (account) => {
     if (!window.confirm(`确定取消收藏“${account.accountName || account.profileUrl}”吗？`)) return;
     try {
       await apiFetch(`/video-accounts/${account.id}`, { method: "DELETE" });
       setVideoAccounts((items) => items.filter((item) => item.id !== account.id));
+      refreshBrowser();
     } catch (error) {
       setLoadError(error.message);
     }
@@ -1260,6 +1160,7 @@ function Workspace({ user, onLogout }) {
     }
     setShowPromptModal(false);
     setEditingPrompt(null);
+    refreshBrowser();
     return payload.prompt;
   };
   const deletePrompt = async (prompt) => {
@@ -1267,6 +1168,7 @@ function Workspace({ user, onLogout }) {
     try {
       await apiFetch(`/prompts/${prompt.id}`, { method: "DELETE" });
       setPrompts((items) => items.filter((item) => item.id !== prompt.id));
+      refreshBrowser();
     } catch (error) {
       setLoadError(error.message);
     }
@@ -1292,10 +1194,10 @@ function Workspace({ user, onLogout }) {
       setLoadError("无法复制提示词，请检查浏览器剪贴板权限");
     }
   };
-  const total = assets.length;
-  const videoCount = assets.filter((item) => item.type === "video").length;
-  const imageCount = assets.filter((item) => item.type === "image").length;
-  const usedCount = assets.filter((item) => item.used).length;
+  const total = summary.counts.total || 0;
+  const videoCount = summary.counts.video || 0;
+  const imageCount = summary.counts.image || 0;
+  const usedCount = summary.counts.used || 0;
   const verifiedPromptCount = prompts.filter((item) => item.status === "验证成功" || item.status === "精选").length;
   const featuredPromptCount = prompts.filter((item) => item.status === "精选").length;
   const promptOutputCount = prompts.reduce(
@@ -1413,7 +1315,7 @@ function Workspace({ user, onLogout }) {
             <Heart size={17} />
             <span>我的收藏</span>
             <em className="accent-count">
-              {assets.filter((item) => item.favorite).length}
+              {summary.counts.favorite || 0}
             </em>
           </button>
           <button
@@ -1634,9 +1536,9 @@ function Workspace({ user, onLogout }) {
                       : isMusicView
                       ? `${musicTracks.length} 首音乐`
                       : isRoleAlbumView
-                      ? `${roleAlbums.length} 个角色`
-                      : filteredAssets.length !== assets.length
-                      ? `${filteredAssets.length} / `
+                      ? `${page.total} 个角色`
+                      : page.total !== total
+                      ? `${page.total} / `
                       : ""}
                     {!isRoleAlbumView && !isVideoAccountView && !isPromptView && !isArchiveView && total}
                   </span>
@@ -1717,7 +1619,7 @@ function Workspace({ user, onLogout }) {
                     {filter}
                     {filter === "已收藏" && (
                       <span>
-                        {assets.filter((item) => item.favorite).length}
+                        {summary.counts.favorite || 0}
                       </span>
                     )}
                   </button>
@@ -1815,12 +1717,9 @@ function Workspace({ user, onLogout }) {
             {activeCharacter && (
               <div className="character-category-tabs" aria-label="人物素材分类">
                 {["", ...CHARACTER_CATEGORIES].map((category) => {
-                  const count = assets.filter((item) => {
-                    const matchesCharacter = activeCharacter === "待归类人物" || activeCharacter === "未命名角色"
-                      ? !item.characterName
-                      : item.characterName === activeCharacter;
-                    return isCharacterAlbumAsset(item) && matchesCharacter && (!category ? true : albumCategory(item) === category);
-                  }).length;
+                  const name = ["待归类人物", "未命名角色"].includes(activeCharacter) ? "" : activeCharacter;
+                  const count = summary.characters.filter((item) => item.name === name && (!category || item.category === category))
+                    .reduce((sum, item) => sum + item.count, 0);
                   return (
                     <button
                       key={category || "all"}
@@ -1833,10 +1732,12 @@ function Workspace({ user, onLogout }) {
                 })}
               </div>
             )}
+            {page.error && <div className="auth-error" role="alert">{page.error}<button type="button" onClick={page.reload}>重试</button></div>}
             {loadingAssets ? (
               <div className="empty-state"><div className="empty-icon"><Cloud size={22} /></div><h3>正在加载素材</h3><p>从云端同步你的素材与标签</p></div>
             ) : isRoleAlbumView ? (
               roleAlbums.length ? (
+                <>
                 <div className="role-album-grid">
                   {roleAlbums.map((album) => (
                     <div
@@ -1885,6 +1786,8 @@ function Workspace({ user, onLogout }) {
                     </div>
                   ))}
                 </div>
+                <AssetPageControls page={page} noun="相册" scrollTarget=".role-album-grid" />
+                </>
               ) : (
                 <EmptyState query={query} onReset={() => { setQuery(""); setActiveFilter("全部"); }} />
               )
@@ -1904,18 +1807,9 @@ function Workspace({ user, onLogout }) {
                     />
                   ))}
                 </div>
-                {displayedAssets.length < filteredAssets.length && (
-                  <div className="asset-load-more">
-                    <button
-                      className="secondary-button"
-                      onClick={() => setVisibleAssetLimit((limit) => limit + 60)}
-                    >
-                      加载更多素材（还剩 {filteredAssets.length - displayedAssets.length} 条）
-                    </button>
-                  </div>
-                )}
+                <AssetPageControls page={page} scrollTarget=".asset-grid,.asset-list" />
               </>
-            ) : activeFolder === "角色设定" && activeCharacter ? (
+            ) : page.error ? null : activeFolder === "角色设定" && activeCharacter ? (
               <div className="empty-state">
                 <div className="empty-icon"><FileImage size={22} /></div>
                 <h3>这个人物相册还没有素材</h3>
@@ -1945,11 +1839,14 @@ function Workspace({ user, onLogout }) {
           </section>
         </div>
       </main>
+      {openingDetail && <div className="download-toast" role="status">正在加载素材详情…</div>}
       {selected && (
         <DetailDrawer
           asset={selected}
           allAssets={assets}
           onClose={() => {
+            detailRequest.current++;
+            setOpeningDetail(false);
             setSelected(null);
             setDetailTrail([]);
           }}
@@ -1963,11 +1860,13 @@ function Workspace({ user, onLogout }) {
           onBack={detailTrail.length ? backToPreviousAsset : undefined}
           onDownload={downloadAsset}
           onAssetUpdated={(updated) => {
+            refreshBrowser();
             setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
             setSelected(updated);
             setDetailTrail((items) => items.map((item) => (item.id === updated.id ? updated : item)));
           }}
           onTagsUpdated={(tags) => {
+            refreshBrowser();
             const updated = { ...selected, tags };
             setAssets((items) => items.map((item) => (item.id === selected.id ? updated : item)));
             setSelected(updated);
@@ -2203,6 +2102,7 @@ function PromptLibrary({ prompts, assets, loading, copiedPromptId, onCreate, onC
       return inPlatform && inStatus && inTag && inSearch;
     });
   }, [platform, prompts, query, status, tag]);
+  const linked = useAssetsById(apiFetch, filteredPrompts.flatMap((prompt) => (prompt.assetLinks || []).map((link) => link.assetId)));
   const resetFilters = () => {
     setQuery("");
     setPlatform("");
@@ -2234,6 +2134,7 @@ function PromptLibrary({ prompts, assets, loading, copiedPromptId, onCreate, onC
           </select>
         </div>
       </div>
+      {linked.error && <div className="auth-error" role="alert">{linked.error}</div>}
       {!filteredPrompts.length ? (
         <div className="video-account-empty prompt-empty">
           <div className="empty-icon"><FileText size={22} /></div>
@@ -2267,7 +2168,7 @@ function PromptLibrary({ prompts, assets, loading, copiedPromptId, onCreate, onC
               )}
               <p className="prompt-content-preview">{prompt.content}</p>
               {(prompt.tags || []).length > 0 && <div className="tag-row prompt-tag-row">{prompt.tags.map((item) => <span key={item}>#{item}</span>)}</div>}
-              <PromptAssetLinks assetLinks={prompt.assetLinks} assets={assets} onOpenAsset={onOpenAsset} />
+              <PromptAssetLinks assetLinks={prompt.assetLinks} assets={linked.rows} onOpenAsset={onOpenAsset} />
               <div className="prompt-card-foot">
                 <span>{prompt.rating ? `${prompt.rating} / 5 分` : "未评分"}</span>
                 <span>更新于 {formatPromptDate(prompt.updatedAt)}</span>
@@ -2281,7 +2182,7 @@ function PromptLibrary({ prompts, assets, loading, copiedPromptId, onCreate, onC
 }
 
 function PromptAssetLinks({ assetLinks = [], assets, onOpenAsset }) {
-  const assetById = useMemo(() => new Map(assets.map((asset) => [String(asset.id), asset])), [assets]);
+  const assetById = new Map(assets.map((asset) => [String(asset.id), asset]));
   const links = assetLinks.map((link) => ({ ...link, asset: assetById.get(String(link.assetId)) })).filter((link) => link.asset);
   if (!links.length) return <div className="prompt-linked-assets prompt-linked-assets-empty"><span>尚未关联素材</span></div>;
   return (
@@ -2393,16 +2294,14 @@ function PromptModal({ prompt, assets, onClose, onSave }) {
             </div>
             <div className="prompt-link-grid">
               {PROMPT_LINK_ROLES.map((role) => {
-                const options = assets.filter((asset) => role.types.includes(asset.type));
                 return (
-                  <label key={role.value}>
+                  <div key={role.value}>
                     <span>{role.label}</span>
-                    <select value={linkSelections[role.value]} onChange={(event) => setLinkSelections((items) => ({ ...items, [role.value]: event.target.value }))}>
-                      <option value="">暂不关联</option>
-                      {options.map((asset) => <option value={asset.id} key={asset.id}>{asset.name}</option>)}
-                    </select>
+                    <AssetPicker label={role.label} multiple={false} type={role.types.length === 1 ? role.types[0] : undefined}
+                      value={linkSelections[role.value] ? [linkSelections[role.value]] : []}
+                      onChange={(ids) => setLinkSelections((items) => ({ ...items, [role.value]: ids[0] || "" }))} />
                     <small>{role.hint}</small>
-                  </label>
+                  </div>
                 );
               })}
             </div>
@@ -2888,11 +2787,12 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
       });
     return () => { cancelled = true; };
   }, [asset.id, isCreation]);
+  const related = useAssetsById(apiFetch, [...(asset.parentAssetIds || []), ...(asset.derivedAssetIds || [])]);
   const parentAssets = (asset.parentAssetIds || [])
-    .map((id) => allAssets.find((item) => String(item.id) === String(id)))
+    .map((id) => related.rows.find((item) => String(item.id) === String(id)))
     .filter(Boolean);
   const derivedAssets = (asset.derivedAssetIds || [])
-    .map((id) => allAssets.find((item) => String(item.id) === String(id)))
+    .map((id) => related.rows.find((item) => String(item.id) === String(id)))
     .filter(Boolean);
   const submitComment = async () => {
     const content = commentText.trim();
@@ -2967,6 +2867,7 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
           )}
         </div>
         <div className="detail-content">
+          {related.error && <div className="auth-error" role="alert">关联素材加载失败：{related.error}</div>}
           <div className="detail-title-row">
             <div>
               <p className="detail-type">
@@ -3258,16 +3159,8 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
   const [replacementFile, setReplacementFile] = useState(null);
   const [replaceProgress, setReplaceProgress] = useState(null);
   const [parentAssetIds, setParentAssetIds] = useState((asset.parentAssetIds || []).map(String));
-  const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const referenceAssets = assets.filter((item) => String(item.id) !== String(asset.id) && (item.type === "video" || item.type === "image"));
-  const selectedReferenceAssets = referenceAssets.filter((item) => parentAssetIds.includes(String(item.id)));
-  const referenceLabel = selectedReferenceAssets.length === 0
-    ? "不关联参考素材"
-    : selectedReferenceAssets.length === 1
-      ? selectedReferenceAssets[0].name
-      : `${selectedReferenceAssets[0].name} 等 ${selectedReferenceAssets.length} 个`;
   const submit = async (event) => {
     event.preventDefault();
     const trimmedName = name.trim();
@@ -3369,45 +3262,7 @@ function EditAssetModal({ asset, assets = [], onClose, onSave, onReplace }) {
           </label>
           <label className="edit-field-wide">
             关联参考素材
-            <div className="reference-picker">
-              <button
-                type="button"
-                className={`reference-picker-trigger ${selectedReferenceAssets.length ? "has-selection" : ""}`}
-                onClick={() => setParentPickerOpen((open) => !open)}
-                aria-expanded={parentPickerOpen}
-              >
-                <span>{referenceLabel}</span>
-                <ChevronDown size={15} />
-              </button>
-              {parentPickerOpen && (
-                <div className="reference-picker-menu">
-                  <div className="reference-picker-head">
-                    <span>可选，可多选</span>
-                    {selectedReferenceAssets.length > 0 && (
-                      <button type="button" onClick={() => setParentAssetIds([])}>清除选择</button>
-                    )}
-                  </div>
-                  {referenceAssets.length ? referenceAssets.map((item) => {
-                    const selectedReference = parentAssetIds.includes(String(item.id));
-                    return (
-                      <button
-                        type="button"
-                        className={`reference-option ${selectedReference ? "selected" : ""}`}
-                        key={item.id}
-                        onClick={() => setParentAssetIds((items) => selectedReference
-                          ? items.filter((id) => id !== String(item.id))
-                          : [...items, String(item.id)])}
-                      >
-                        <span className="reference-option-check">{selectedReference && <Check size={13} />}</span>
-                        <span>{item.name}</span>
-                      </button>
-                    );
-                  }) : (
-                    <div className="reference-empty">暂无可关联素材</div>
-                  )}
-                </div>
-              )}
-            </div>
+            <AssetPicker value={parentAssetIds} onChange={setParentAssetIds} exclude={asset.id} />
             <small>可不选，也可以多选参考素材</small>
           </label>
           <label className="edit-field-wide">
@@ -3478,7 +3333,6 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
   const [used, setUsed] = useState(false);
   const [folder, setFolder] = useState(defaultFolder || "灵感收集");
   const [parentAssetIds, setParentAssetIds] = useState([]);
-  const [parentPickerOpen, setParentPickerOpen] = useState(false);
   const [formError, setFormError] = useState("");
   useEffect(() => {
     if (defaultCharacterName) {
@@ -3486,13 +3340,6 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
       setAlbumChoice(defaultCharacterName);
     }
   }, [defaultCharacterName]);
-  const referenceAssets = assets.filter((asset) => asset.type === "video" || asset.type === "image");
-  const selectedReferenceAssets = referenceAssets.filter((asset) => parentAssetIds.includes(String(asset.id)));
-  const referenceLabel = selectedReferenceAssets.length === 0
-    ? "不关联参考素材"
-    : selectedReferenceAssets.length === 1
-      ? selectedReferenceAssets[0].name
-      : `${selectedReferenceAssets[0].name} 等 ${selectedReferenceAssets.length} 个`;
   const chooseFiles = (fileList) =>
     setFiles((items) => [...items, ...Array.from(fileList || [])]);
   const submit = () => {
@@ -3667,45 +3514,7 @@ function UploadModal({ onClose, onSubmit, fileInput, assets, uploading, progress
           )}
           <label>
             关联参考素材
-            <div className="reference-picker">
-              <button
-                type="button"
-                className={`reference-picker-trigger ${selectedReferenceAssets.length ? "has-selection" : ""}`}
-                onClick={() => setParentPickerOpen(!parentPickerOpen)}
-                aria-expanded={parentPickerOpen}
-              >
-                <span>{referenceLabel}</span>
-                <ChevronDown size={15} />
-              </button>
-              {parentPickerOpen && (
-                <div className="reference-picker-menu">
-                  <div className="reference-picker-head">
-                    <span>可选，可多选</span>
-                    {selectedReferenceAssets.length > 0 && (
-                      <button type="button" onClick={() => setParentAssetIds([])}>清除选择</button>
-                    )}
-                  </div>
-                  {referenceAssets.length ? referenceAssets.map((asset) => {
-                    const selectedReference = parentAssetIds.includes(String(asset.id));
-                    return (
-                      <button
-                        type="button"
-                        className={`reference-option ${selectedReference ? "selected" : ""}`}
-                        key={asset.id}
-                        onClick={() => setParentAssetIds((items) => selectedReference
-                          ? items.filter((id) => id !== String(asset.id))
-                          : [...items, String(asset.id)])}
-                      >
-                        <span className="reference-option-check">{selectedReference && <Check size={13} />}</span>
-                        <span>{asset.name}</span>
-                      </button>
-                    );
-                  }) : (
-                    <div className="reference-empty">暂无可关联素材</div>
-                  )}
-                </div>
-              )}
-            </div>
+            <AssetPicker value={parentAssetIds} onChange={setParentAssetIds} />
             <small>可不选，也可以多选参考素材</small>
           </label>
           <div className="metadata-row">
@@ -3841,13 +3650,10 @@ function CreateCharacterAlbumModal({ onClose, onCreate }) {
 function AlbumCoverPickerModal({ albumName, assets, currentCoverAssetId, onClose, onPick }) {
   const [savingId, setSavingId] = useState(null);
   const [error, setError] = useState("");
-  const candidates = useMemo(() => {
-    const rank = (asset) =>
-      (asset.characterCategory === "正脸" ? 0 : 1) * 10 + (asset.type === "image" ? 0 : 1);
-    return [...assets].sort(
-      (a, b) => rank(a) - rank(b) || new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
-    );
-  }, [assets]);
+  const [query, setQuery] = useState("");
+  const q = useDebounced(query);
+  const page = useAssetPage(apiFetch, normaliseAsset, { folder: "角色设定", character: albumName, q, sort: "cover" });
+  const candidates = page.assets;
   const pick = async (assetId) => {
     setSavingId(assetId === null ? "reset" : assetId);
     setError("");
@@ -3871,7 +3677,9 @@ function AlbumCoverPickerModal({ albumName, assets, currentCoverAssetId, onClose
           </div>
           <button type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
         </div>
-        {candidates.length ? (
+        <input aria-label="搜索封面素材" placeholder="搜索素材" value={query} onChange={(e) => setQuery(e.target.value)} />
+        {page.error && <div className="auth-error" role="alert">{page.error}<button type="button" onClick={page.reload}>重试</button></div>}
+        {page.loading ? <div className="reference-empty">正在加载素材</div> : candidates.length ? (
           <div className="album-cover-grid">
             {candidates.map((asset) => (
               <button
@@ -3894,6 +3702,7 @@ function AlbumCoverPickerModal({ albumName, assets, currentCoverAssetId, onClose
         ) : (
           <div className="album-cover-empty-state">这个相册还没有素材，先上传再设置封面。</div>
         )}
+        <AssetPageControls page={page} scrollTarget=".album-cover-grid" />
         {error && <div className="auth-error edit-error">{error}</div>}
         <div className="modal-foot">
           {currentCoverAssetId ? (
