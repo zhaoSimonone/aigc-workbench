@@ -67,6 +67,23 @@ node src/index.js
 
 服务器部署使用根目录的 `docker-compose.yml`。Compose 只暴露 `127.0.0.1:18080`，容器、网络和数据卷均使用 `aigc_shelf_*` 独立名称；Nginx 配置见 `deploy/nginx-aigc.chatcanvas.online.conf`。
 
+## 命令行查看与下载
+
+不方便打开网页时，用 `aigc` 在终端翻页、按名称搜索和下载素材，不会预览图片：
+
+```bash
+aigc login
+aigc list --page 1 --limit 20
+aigc list 蕾姆 --folder 角色设定
+aigc download <素材ID> -o ~/Desktop
+```
+
+`--output` 可以是目录或完整文件名。名称命中多条时会列出 ID，再用 ID 下载。命令安装到 `~/.local/bin/aigc`；本机没有时执行：
+
+```bash
+ln -sf "$(pwd)/skills/aigc-asset-upload/scripts/aigc.py" ~/.local/bin/aigc
+```
+
 ## COS 接入边界
 
 不要把 SecretId 或 SecretKey 放进 React/Vite 的 `VITE_*` 环境变量。建议在同一台服务器上增加服务端上传接口：

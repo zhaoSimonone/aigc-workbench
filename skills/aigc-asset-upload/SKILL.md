@@ -1,6 +1,6 @@
 ---
 name: aigc-asset-upload
-description: Upload user-selected local videos, images and GIFs to the AIGC Shelf asset library with content-based routing, naming and tagging. Use when the user asks to import or batch-upload creative assets, or to put files into a specific library — 服装库（服装/穿搭参考）、发型库（发型/头饰参考）、通用片段（可复用剪辑片段）、GIF 素材（视频遮挡用 GIF 贴纸）、角色设定（人物正脸/场景/动作/妆造）、项目资料、灵感收集或我的创作. Also use when the user asks to bulk-curate a character's 妆造图/发型图 from multiple numbered video folders, 整理妆造图, 区分妆造和发型, or to name assets by their visual features. Triggers include 上传这些素材、传进服装库、这些是发型、上传通用片段、上传遮挡 GIF、把图传到素材库、整理蕾姆妆造图、1017视频及之后的妆造图.
+description: Upload user-selected local videos, images and GIFs to the AIGC Shelf asset library with content-based routing, naming and tagging. Use when the user asks to import or batch-upload creative assets, or to put files into a specific library — 服装库（服装/穿搭参考）、发型库（发型/头饰参考）、通用片段（可复用剪辑片段）、GIF 素材（视频遮挡用 GIF 贴纸）、角色设定（人物正脸/场景/动作/妆造）、项目资料、灵感收集或我的创作. Also use when the user asks to bulk-curate a character's 妆造图/发型图 from multiple numbered video folders, 整理妆造图, 区分妆造和发型, or to name assets by their visual features. Triggers include 上传这些素材、传进服装库、这些是发型、上传通用片段、上传遮挡 GIF、把图传到素材库、整理蕾姆妆造图、1017视频及之后的妆造图. Also use when the user asks to list, search, or download existing AIGC Shelf assets from the command line without opening the website.
 ---
 
 # AIGC 素材上传
@@ -215,6 +215,19 @@ python3 /path/to/skills/aigc-asset-upload/scripts/upload_assets.py \
 其它参数：`--source-url` 保存原视频/参考链接；`--used` 标记已使用；可重复传入 `--parent-asset-id` 关联原素材；目标为 `角色设定` 时用 `--character-name`（必需）和 `--character-category` 指定人物相册与分类。
 
 `--dir` 可重复指定；每个目录取**本层**的图片/视频（跳过 `已上传/` 等子目录和隐藏文件），与扩展名无关。`--archive` 只作用于 `--dir` 指定的目录：把已在库的文件改名成「服务端素材名 + 原扩展名」并移入 `<目录>/已上传/`，再重算哈希复核一遍。
+
+不便打开网页时，用同一个会话做列表和下载。只输出文字，不预览图片；分页走服务端 `limit`/`offset`，搜索走 `q`：
+
+```bash
+aigc login
+aigc list
+aigc list 蕾姆 --page 2 --limit 20
+aigc list --folder 服装库 -q 针织
+aigc download <素材ID> -o ~/Desktop
+aigc download --name 蕾姆正脸 -o ~/Desktop/assets
+```
+
+名称命中多条时打印 ID 后退出，不要猜。`--output` 可以是目录或完整文件名；已存在的文件默认跳过，加 `--force` 覆盖。会话失效时先跑 `aigc login`。命令安装到 `~/.local/bin/aigc`；若 PATH 里没有，用 `python3 /path/to/skills/aigc-asset-upload/scripts/aigc.py`。
 
 ## 安全与边界
 
