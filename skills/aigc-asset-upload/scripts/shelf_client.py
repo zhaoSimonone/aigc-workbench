@@ -10,7 +10,7 @@ import tempfile
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urljoin, urlparse
-from urllib.request import Request, HTTPRedirectHandler, build_opener
+from urllib.request import Request, HTTPRedirectHandler, ProxyHandler, build_opener
 
 
 DEFAULT_API = "https://aigc.chatcanvas.online"
@@ -81,7 +81,8 @@ class Client:
         self.expires_at = None
         self.cookies = self._load_cookies()
         self.last_response = {}
-        self.opener = build_opener(NoRedirect())
+        # 显式禁用环境代理：本机代理会让 API 与 COS 直连请求时通时断。
+        self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
     def _load_cookies(self):
         try:

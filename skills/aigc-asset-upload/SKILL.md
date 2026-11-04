@@ -184,7 +184,7 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
 脚本默认使用生产地址 `https://aigc.chatcanvas.online`，可用 `AIGC_SHELF_URL` 或 `--api` 覆盖。
 
-脚本使用共享标准库 HTTP 客户端，遵循 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`（及小写形式），**不需要手动清代理变量**。HTTPS 通过 CONNECT 后校验 TLS；下载会跟随重定向，跨域不会发送素材库 Cookie。会话、证书和依赖配置见 [跨 Agent 配置](references/runtime.md)。
+脚本使用共享标准库 HTTP 客户端，**固定禁用环境代理**（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 及小写形式一律不生效），API 与 COS 下载走直连，**不需要手动清代理变量**。HTTPS 直接校验 TLS；下载会跟随重定向，跨域不会发送素材库 Cookie。会话、证书和依赖配置见 [跨 Agent 配置](references/runtime.md)。
 
 命令中的 `/path/to/skills` 替换为当前 Agent 的技能目录。整批同库时用 `--folder`，仍须提供逐文件命名和 3–5 个标签：
 
