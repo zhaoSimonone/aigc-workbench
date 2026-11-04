@@ -71,4 +71,4 @@ JSON 写入使用原生数组/布尔值；multipart 上传的数组字段使用 
 
 共用 `scripts/shelf_client.py`，仅依赖 Python 标准库。`request()` 保留 `(status, payload)` 返回值；3xx 的 payload 含 `url/redirect/status`。下载字节使用 `download(url, destination)`，会跟随重定向，跨域不携带 Shelf Cookie。`last_response` 保留原始响应体、状态、响应头（去除 Set-Cookie），错误通过 `APIError.status/body/headers` 读取。
 
-优先 `get_asset(id)`，不要全库回读。`list_assets(**filters)` 自动分页。旧部署缺少详情路由时才回退列表查 ID；真正的 JSON 404 不回退。`metadata_policy()` 仅在旧版 HTML 404 时使用兼容文件夹常量，鉴权或服务故障不会被静默吞掉。
+优先 `get_asset(id)`，不要全库回读。`list_assets_page(limit, offset, **filters)` 拉一页；`list_assets(**filters)` 自动分页。下载用 `download_url(id)` 再 `download(url, destination)`。旧部署缺少详情路由时才回退列表查 ID；真正的 JSON 404 不回退。`metadata_policy()` 仅在旧版 HTML 404 时使用兼容文件夹常量，鉴权或服务故障不会被静默吞掉。

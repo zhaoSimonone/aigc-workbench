@@ -185,10 +185,16 @@ class Client:
         body = json.dumps({"email": email, "password": password}).encode()
         return self.require("POST", "/api/auth/login", body, {"Content-Type": "application/json"}).get("user", {})
 
+    def list_assets_page(self, limit=20, offset=0, **filters):
+        query = {key: value for key, value in filters.items() if value not in (None, "")}
+        query["limit"] = int(limit)
+        query["offset"] = int(offset)
+        return self.require("GET", "/api/assets?" + urlencode(query))
+
     def list_assets(self, **filters):
         assets, offset = [], 0
         while True:
-            payload = self.require("GET", "/api/assets?" + urlencode({**filters, "limit": 200, "offset": offset}))
+            payload = self.list_assets_page(limit=200, offset=offset, **filters)
             page = payload.get("assets", [])
             assets.extend(page)
             if not payload.get("hasMore"):
@@ -196,6 +202,13 @@ class Client:
             if not page:
                 raise RuntimeError("分页响应为空但 hasMore=true")
             offset += len(page)
+
+    def download_url(self, asset_id):
+        payload = self.require("GET", f"/api/assets/{asset_id}/download-url")
+        url = payload.get("url")
+        if not url:
+            raise RuntimeError("服务端没有返回下载地址")
+        return url, payload.get("filename") or str(asset_id)
 
     def metadata_policy(self):
         if not hasattr(self, "_policy"):
