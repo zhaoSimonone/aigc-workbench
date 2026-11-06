@@ -20,13 +20,17 @@ description: Upload a local AIGC video/image directory to Baidu Netdisk (百度�
 
 1. 确认范围。用户指定目录时按指定目录同步；未指定时用默认的 `/Users/simon/Desktop/AIGC`。先跑 `--dry-run` 把待传文件清单和体积报给用户确认，尤其是首次同步大目录时。
 2. 确认网盘目标路径。默认 `/AIGC`，与本地目录同名的一级子目录会自动落到 `/AIGC/<目录名>`。
-3. 执行 `scripts/netdisk_sync.py`，等脚本输出完整的成功/跳过/失败汇总后再汇报。
+3. 优先执行 `aigc pan upload <本地路径> <网盘目录>`；短命令不可用时再直接跑 `scripts/netdisk_sync.py`。等脚本输出完整的成功/跳过/失败汇总后再汇报。
 4. 汇报时必须包含三个数字：上传数、跳过数、失败数。失败项逐个列出文件名和错误原因，不要把失败说成已上传。
 5. 用户要求"上传后删本地"时，**不要**由脚本自动删除。先用 `--dry-run` 核对清单，再按"安全与边界"里的流程让用户确认后手动处理。
 
 ## 调用
 
 ```bash
+# 推荐短命令：本地文件或目录都可以
+aigc pan upload /Users/simon/Desktop/AIGC/902视频 /AIGC/902视频 --dry-run
+aigc pan upload ./成片.mp4 /AIGC/1106视频/成片
+
 # 先看清单，不实际上传
 python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
   /Users/simon/Desktop/AIGC/902视频 --dest /AIGC/902视频 --dry-run

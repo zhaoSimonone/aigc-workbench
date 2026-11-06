@@ -257,6 +257,54 @@ class AssetCliTests(unittest.TestCase):
         import aigc
         self.assertIs(aigc.main, main)
 
+    def test_upload_forwards_remaining_args(self):
+        with patch("upload_assets.main", return_value=0) as mocked:
+            code = main(["upload", "foo.mp4", "--folder", "我的创作", "--name", "蓝发overlord换装拼接"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with([
+            "foo.mp4", "--folder", "我的创作", "--name", "蓝发overlord换装拼接",
+        ])
+
+    def test_upload_alias_forwards_args(self):
+        with patch("upload_assets.main", return_value=0) as mocked:
+            code = main(["up", "bar.gif", "--tags", "遮挡 贴纸 胸口"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with(["bar.gif", "--tags", "遮挡 贴纸 胸口"])
+
+    def test_upload_forwards_flags_before_file(self):
+        with patch("upload_assets.main", return_value=0) as mocked:
+            code = main(["upload", "--folder", "我的创作", "foo.mp4"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with(["--folder", "我的创作", "foo.mp4"])
+
+    def test_pan_upload_forwards_remaining_args(self):
+        with patch("pan.main", return_value=0) as mocked:
+            code = main(["pan", "upload", "foo.mp4", "/AIGC/x"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with(["upload", "foo.mp4", "/AIGC/x"])
+
+    def test_pan_shortcut_without_upload_verb(self):
+        with patch("pan.main", return_value=0) as mocked:
+            code = main(["pan", "foo.mp4", "/AIGC/x", "--dry-run"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with(["foo.mp4", "/AIGC/x", "--dry-run"])
+
+    def test_netdisk_alias_forwards_args(self):
+        with patch("pan.main", return_value=0) as mocked:
+            code = main(["netdisk", "up", "foo.mp4", "/AIGC/x", "--force"])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once_with(["up", "foo.mp4", "/AIGC/x", "--force"])
+
+    def test_pan_main_forwards_to_netdisk_sync(self):
+        import pan
+        with patch("pan._netdisk_sync") as loader:
+            loader.return_value.main.return_value = 0
+            code = pan.main(["upload", "foo.mp4", "/AIGC/x", "--dry-run", "--force", "--profile", "fast"])
+        self.assertEqual(code, 0)
+        loader.return_value.main.assert_called_once_with([
+            "foo.mp4", "--dest", "/AIGC/x", "--dry-run", "--force", "--profile", "fast",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

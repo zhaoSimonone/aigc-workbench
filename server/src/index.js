@@ -2591,9 +2591,10 @@ app.get('/api/netdisk/sync-commands', requireUser, (req, res) => {
   const safeLocalPath = /^[/~][^\n\r]{0,300}$/.test(localPath) ? localPath : '';
   const dest = `${netdiskConfig.rootPath}/1007视频`;
   const script = NETDISK_SYNC_SCRIPT;
+  const local = safeLocalPath || '/Users/simon/Desktop/AIGC/1007视频';
   const commands = [
-    { id: 'dry-run', label: '① 先看清单（不实际上传）', command: `python3 ${script} ${safeLocalPath || '/Users/simon/Desktop/AIGC/1007视频'} --dest ${dest} --dry-run` },
-    { id: 'upload', label: '② 真正同步到百度网盘', command: `python3 ${script} ${safeLocalPath || '/Users/simon/Desktop/AIGC/1007视频'} --dest ${dest}` },
+    { id: 'dry-run', label: '① 先看清单（不实际上传）', command: `aigc pan upload ${local} ${dest} --dry-run` },
+    { id: 'upload', label: '② 真正同步到百度网盘', command: `aigc pan upload ${local} ${dest}` },
     { id: 'tree', label: '③ 列出网盘目录（JSON）', command: `python3 ${script} tree --root ${netdiskConfig.rootPath} --json` },
     { id: 'publish-file', label: '④ 写出目录快照', command: `python3 ${script} publish-catalog --root ${netdiskConfig.rootPath}` },
     { id: 'publish-api', label: '⑤ 直接发布到工作台（本机 API）', command: `python3 ${script} publish-catalog --root ${netdiskConfig.rootPath} --api http://127.0.0.1:18080/api/netdisk/catalog --cookie-env AIGC_SESSION_COOKIE` },

@@ -67,15 +67,17 @@ node src/index.js
 
 服务器部署使用根目录的 `docker-compose.yml`。Compose 只暴露 `127.0.0.1:18080`，容器、网络和数据卷均使用 `aigc_shelf_*` 独立名称；Nginx 配置见 `deploy/nginx-aigc.chatcanvas.online.conf`。
 
-## 命令行查看与下载
+## 命令行查看、下载与上传
 
-不方便打开网页时，用 `aigc` 在终端翻页、按名称搜索和下载素材，不会预览图片：
+不方便打开网页时，用 `aigc` 在终端翻页、按名称搜索、下载和上传素材，不会预览图片：
 
 ```bash
 aigc login
 aigc list --page 1 --limit 20
 aigc list 蕾姆 --folder 角色设定
 aigc download <素材ID> -o ~/Desktop
+aigc upload <文件> --folder 我的创作 --name 标题 --tags "标签1 标签2 标签3"
+aigc pan upload <本地文件或目录> <网盘目录>
 ```
 
 `--output` 可以是目录或完整文件名。名称命中多条时会列出 ID，再用 ID 下载。命令安装到 `~/.local/bin/aigc`；本机没有时执行：
@@ -162,18 +164,20 @@ python3 skills/aigc-asset-organize/scripts/organize_assets.py music-library --bu
 
 ```bash
 # 先看清单，不实际上传
-python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
-  /Users/simon/Desktop/AIGC/1007视频 --dest /AIGC/1007视频 --dry-run
+aigc pan upload /Users/simon/Desktop/AIGC/1007视频 /AIGC/1007视频 --dry-run
 
 # 安全档：4 MiB、串行、固定上传域名
-python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
-  /Users/simon/Desktop/AIGC/1007视频 --dest /AIGC/1007视频
+aigc pan upload /Users/simon/Desktop/AIGC/1007视频 /AIGC/1007视频
 
 # 快速档：8 MiB、文件并发 4、动态上传域名
-python3 skills/baidu-netdisk-archive/scripts/netdisk_sync.py \
-  /Users/simon/Desktop/AIGC/1007视频 --dest /AIGC/1007视频 \
+aigc pan upload /Users/simon/Desktop/AIGC/1007视频 /AIGC/1007视频 \
   --profile fast --metrics-file outputs/netdisk-upload-metrics.jsonl
+
+# 单文件：落到网盘目录下的同名文件
+aigc pan upload ./成片.mp4 /AIGC/1106视频/成片
 ```
+
+底层脚本仍是 `skills/baidu-netdisk-archive/scripts/netdisk_sync.py`，短命令不够用时可以直接调它。
 
 上传 Token 仍建议只放本机的 `BAIDU_NETDISK_ACCESS_TOKEN` 或 `~/.config/aigc-workbench/baidu_netdisk_token`。上传使用线程内连接池、分片重试和逐片 MD5 校验；脚本不会删除本地文件。
 

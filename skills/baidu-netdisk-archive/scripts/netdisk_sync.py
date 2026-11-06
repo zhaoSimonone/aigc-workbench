@@ -659,7 +659,21 @@ def _upload_blocks(ctx, item, session, host, query_mode, uploadid, digests, want
 
 
 def collect(src, excludes, includes):
+    """Return ``(absolute_path, relative_path)`` pairs under *src*.
+
+    *src* may be a directory (walked as before) or a single file. A file is
+    emitted as ``(abs, basename)`` so ``build_plan`` still joins
+    ``dest + "/" + rel``. Explicitly named files are not skipped just because
+    they are hidden; ``excludes`` / ``includes`` still apply to the basename.
+    """
     files = []
+    if os.path.isfile(src):
+        name = os.path.basename(src)
+        if any(fnmatch.fnmatch(name, pat) for pat in excludes):
+            return []
+        if includes and not any(fnmatch.fnmatch(name, pat) for pat in includes):
+            return []
+        return [(os.path.abspath(src), name)]
     for root, dirs, names in os.walk(src):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for name in sorted(names):
@@ -674,6 +688,26 @@ def collect(src, excludes, includes):
                 continue
             files.append((path, rel))
     return files
+
+
+def normalize_sources(src, dest, excludes, includes):
+    """Resolve a local file or directory into ``(src, dest_dir, files)``.
+
+    *dest* is a remote directory. If *src* is a file and *dest* already ends
+    with that filename, treat *dest* as the full remote file path so the
+    basename is not nested twice (``/AIGC/foo/a.mp4/a.mp4``). A dest that ends
+    with a different name stays a directory; this command does not rename.
+    """
+    src = os.path.abspath(os.path.expanduser(src))
+    dest = "/" + str(dest or "").strip("/")
+    excludes = excludes or ["*.DS_Store"]
+    includes = includes or []
+    if os.path.isfile(src):
+        name = os.path.basename(src)
+        dest_name = dest.rsplit("/", 1)[-1]
+        if dest_name == name:
+            dest = dest.rsplit("/", 1)[0] or "/"
+    return src, dest, collect(src, excludes, includes)
 
 
 def parse_chunk_size(value):
@@ -1238,15 +1272,15 @@ def main(argv=None):
             return 2
 
     parser = argparse.ArgumentParser(
-        description="把本地目录同步到百度网盘（分片上传 + 逐片校验）",
+        description="把本地文件或目录同步到百度网盘（分片上传 + 逐片校验）",
         epilog=("只读子命令（不触碰本地文件、不上传）：\n"
                 "  list <网盘目录> --json              列出一层目录\n"
                 "  tree --root /AIGC --json            递归列出目录树\n"
                 "  publish-catalog --root /AIGC       写出目录快照，可选发布到工作台\n"
                 "  quota --json                       查询网盘容量\n"
                 "不带子命令时保持原有行为：把本地目录同步上传到网盘。"),)
-    parser.add_argument("src", nargs="?", default=DEFAULT_SRC, help="本地源目录")
-    parser.add_argument("--dest", default=DEFAULT_DEST, help="网盘目标目录")
+    parser.add_argument("src", nargs="?", default=DEFAULT_SRC, help="本地源文件或目录")
+    parser.add_argument("--dest", default=DEFAULT_DEST, help="网盘目标目录；单文件时也可写成完整远端路径")
     parser.add_argument("--token", help="Access Token，默认读环境变量或本地 token 文件")
     parser.add_argument("--include", action="append", default=[],
                         help="只同步匹配的文件/目录名，可重复")
@@ -1277,8 +1311,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     src = os.path.abspath(os.path.expanduser(args.src))
-    if not os.path.isdir(src):
-        print(f"错误：源目录不存在 {src}", file=sys.stderr)
+    if not os.path.exists(src):
+        print(f"错误：源路径不存在 {src}", file=sys.stderr)
+        return 2
+    if not os.path.isfile(src) and not os.path.isdir(src):
+        print(f"错误：源路径不是文件或目录 {src}", file=sys.stderr)
         return 2
 
     # Validate every upload parameter before touching the network: an invalid
@@ -1291,16 +1328,16 @@ def main(argv=None):
         return 2
 
     excludes = args.exclude or ["*.DS_Store"]
-    files = collect(src, excludes, args.include)
+    src, dest, files = normalize_sources(src, args.dest, excludes, args.include)
     if args.limit:
         files = files[: args.limit]
     if not files:
         print("没有匹配到文件。")
         return 0
 
-    dest = "/" + args.dest.strip("/")
     total_bytes = sum(os.path.getsize(p) for p, _ in files)
-    print(f"源目录    {src}")
+    kind = "源文件" if os.path.isfile(src) else "源目录"
+    print(f"{kind}    {src}")
     print(f"目标      {dest}")
     print(f"待处理    {len(files)} 个文件，合计 {human(total_bytes)}")
     if args.dry_run:

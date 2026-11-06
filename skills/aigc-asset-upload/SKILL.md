@@ -186,11 +186,11 @@ description: Upload user-selected local videos, images and GIFs to the AIGC Shel
 
 脚本使用共享标准库 HTTP 客户端，**固定禁用环境代理**（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 及小写形式一律不生效），API 与 COS 下载走直连，**不需要手动清代理变量**。HTTPS 直接校验 TLS；下载会跟随重定向，跨域不会发送素材库 Cookie。会话、证书和依赖配置见 [跨 Agent 配置](references/runtime.md)。
 
-命令中的 `/path/to/skills` 替换为当前 Agent 的技能目录。整批同库时用 `--folder`，仍须提供逐文件命名和 3–5 个标签：
+整批同库时用 `--folder`，仍须提供逐文件命名和 3–5 个标签：
 
 ```bash
 # 服装目录 → 服装库（扫目录本层，跳过 已上传/；--archive 归档并复核）
-python3 /path/to/skills/aigc-asset-upload/scripts/upload_assets.py \
+aigc upload \
   --dir /Users/simon/Desktop/AIGC/服装 \
   --manifest /tmp/aigc-manifest.json --folder "服装库" --source "本地导入" --archive
 ```
@@ -204,7 +204,7 @@ cat > /tmp/aigc-manifest.json <<'EOF'
   {"path":"/Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4","folder":"通用片段","name":"蓝色双麻花辫-黑色吊带裙","tags":["蓝色双麻花辫","黑色吊带裙","通用片段"]}
 ]}
 EOF
-python3 /path/to/skills/aigc-asset-upload/scripts/upload_assets.py \
+aigc upload \
   /Users/simon/Desktop/AIGC/服装/WechatIMG848.png \
   /Users/simon/Desktop/AIGC/通用片段/蓝色双麻花辫-黑色吊带裙.mp4 \
   --manifest /tmp/aigc-manifest.json
@@ -225,9 +225,12 @@ aigc list 蕾姆 --page 2 --limit 20
 aigc list --folder 服装库 -q 针织
 aigc download <素材ID> -o ~/Desktop
 aigc download --name 蕾姆正脸 -o ~/Desktop/assets
+aigc upload <文件> --folder 我的创作 --name 标题 --tags "标签1 标签2 标签3"
+aigc pan upload <本地文件或目录> <网盘目录>
+aigc pan upload ./成片.mp4 /AIGC/1106视频/成片 --dry-run
 ```
 
-名称命中多条时打印 ID 后退出，不要猜。`--output` 可以是目录或完整文件名；已存在的文件默认跳过，加 `--force` 覆盖。会话失效时先跑 `aigc login`。命令安装到 `~/.local/bin/aigc`；若 PATH 里没有，用 `python3 /path/to/skills/aigc-asset-upload/scripts/aigc.py`。
+名称命中多条时打印 ID 后退出，不要猜。`--output` 可以是目录或完整文件名；已存在的文件默认跳过，加 `--force` 覆盖。会话失效时先跑 `aigc login`。单文件上传素材库用 `aigc upload`；批量整理、`--dir --archive` 和 manifest 也走同一条命令。传到百度网盘用 `aigc pan upload`，不要和素材库 `aigc upload` 混用。命令安装到 `~/.local/bin/aigc`；若 PATH 里没有，用 `python3 /path/to/skills/aigc-asset-upload/scripts/aigc.py`。
 
 ## 安全与边界
 
