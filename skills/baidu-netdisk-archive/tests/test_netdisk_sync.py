@@ -924,6 +924,59 @@ class ListErrnoTests(unittest.TestCase):
             shutil.rmtree(directory, ignore_errors=True)
 
 
+class SourceNormalizeTests(unittest.TestCase):
+    """Single-file src and dest file-path vs directory handling."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.file = make_tmp_file(self.dir, "a.mp4", 1024)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_collect_single_file(self):
+        files = ns.collect(self.file, ["*.DS_Store"], [])
+        self.assertEqual(files, [(os.path.abspath(self.file), "a.mp4")])
+
+    def test_collect_directory_still_walks(self):
+        files = ns.collect(self.dir, ["*.DS_Store"], [])
+        self.assertEqual(files, [(os.path.abspath(self.file), "a.mp4")])
+
+    def test_dest_directory_keeps_basename(self):
+        src, dest, files = ns.normalize_sources(self.file, "/AIGC/foo", ["*.DS_Store"], [])
+        self.assertEqual(dest, "/AIGC/foo")
+        self.assertEqual(files[0][1], "a.mp4")
+
+    def test_dest_file_path_does_not_double_basename(self):
+        src, dest, files = ns.normalize_sources(self.file, "/AIGC/foo/a.mp4", ["*.DS_Store"], [])
+        self.assertEqual(dest, "/AIGC/foo")
+        self.assertEqual(files[0][1], "a.mp4")
+
+    def test_dest_different_name_is_directory(self):
+        _src, dest, files = ns.normalize_sources(self.file, "/AIGC/foo/renamed.mp4", ["*.DS_Store"], [])
+        self.assertEqual(dest, "/AIGC/foo/renamed.mp4")
+        self.assertEqual(files[0][1], "a.mp4")
+
+    def test_dry_run_accepts_single_file(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = ns.main([self.file, "--dest", "/AIGC/foo", "--dry-run"])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("源文件", text)
+        self.assertIn("[计划] a.mp4", text)
+        self.assertIn("目标      /AIGC/foo", text)
+        self.assertNotIn("a.mp4/a.mp4", text)
+
+    def test_dry_run_file_dest_does_not_nest(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = ns.main([self.file, "--dest", "/AIGC/foo/a.mp4", "--dry-run"])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("目标      /AIGC/foo\n", text)
+        self.assertNotIn("/AIGC/foo/a.mp4/a.mp4", text)
+
+
 class BackwardCompatTests(unittest.TestCase):
     """14.7 -- read-only commands still parse and behave."""
 

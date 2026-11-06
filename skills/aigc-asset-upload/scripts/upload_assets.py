@@ -252,19 +252,22 @@ class Client(ShelfClient):
         return payload.get("asset", {})
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Upload local AIGC assets to AIGC Shelf")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="aigc upload",
+        description="上传本地图片或视频到 AIGC Shelf",
+    )
     parser.add_argument("files", nargs="*", type=Path, help="要上传的视频或图片路径")
     parser.add_argument("--dir", action="append", default=[], dest="dirs", metavar="目录",
                         help="扫描该目录下本层的图片/视频（跳过子目录，含 已上传/），可重复指定")
     parser.add_argument("--archive", action="store_true",
                         help="上传后执行归档：按服务端素材名改名并移入 <目录>/已上传/，然后复核")
-    parser.add_argument("--name", default="", help="素材名称；多文件时自动追加原文件名")
+    parser.add_argument("--name", default="", help="素材标题，1–32 字，不能含 · 或 .；默认用文件名")
     parser.add_argument("--name-map", default="", help="逐文件标题映射文件，每行 `路径|标题`，优先于 --name")
     parser.add_argument("--source", default="本地导入")
     parser.add_argument("--source-url", default="")
-    parser.add_argument("--tags", default="待整理", help="以空格或逗号分隔")
-    parser.add_argument("--folder", default=None, help="整批默认文件夹，以服务端 metadata-policy 为准")
+    parser.add_argument("--tags", default="待整理", help="3–5 个标签，空格或逗号分隔")
+    parser.add_argument("--folder", default=None, help="目标素材库，例如 我的创作")
     parser.add_argument("--manifest", default="", help="逐文件元数据 JSON：{items:[{path,folder,name,tags}]}，路径必须是绝对路径")
     parser.add_argument("--used", action="store_true")
     parser.add_argument("--character-name", default="")
@@ -272,7 +275,7 @@ def parse_args():
     parser.add_argument("--parent-asset-id", action="append", dest="parent_asset_ids", default=[])
     parser.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", DEFAULT_API))
     parser.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", str(DEFAULT_COOKIE_FILE)))
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def split_tags(text):
@@ -516,8 +519,8 @@ def archive_directory(client, directory, archive_dir_name="已上传"):
     return 1 if failures else 0
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
     files = []
     seen_paths = set()
     for path in args.files:

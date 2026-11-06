@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""List and download AIGC Shelf assets from the command line."""
+"""List, download and upload AIGC Shelf assets; aigc pan uploads to Baidu Netdisk."""
 
 import argparse
 import shlex
@@ -216,6 +216,20 @@ def resolve_target(client, target, folder=None):
     raise SystemExit(1)
 
 
+def cmd_upload(args):
+    # 其余参数原样交给 upload_assets，这样 --name/--tags/--folder 不会被 aigc 吃掉。
+    from upload_assets import main as upload_main
+    result = upload_main(list(args.upload_args or []))
+    return 0 if result is None else result
+
+
+def cmd_pan(args):
+    # 其余参数原样交给 pan.py，再转给百度网盘 netdisk_sync。
+    from pan import main as pan_main
+    result = pan_main(list(args.pan_args or []))
+    return 0 if result is None else result
+
+
 def cmd_download(args):
     targets = [item for item in list(args.targets or []) + list(args.id or []) if item]
     if args.name:
@@ -265,7 +279,7 @@ def add_common_args(parser):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="aigc",
-        description="查看和下载 AIGC Shelf 素材。只输出文字列表，不预览图片。",
+        description="查看、下载和上传 AIGC Shelf 素材，也可把本地文件传到百度网盘。只输出文字列表，不预览图片。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -292,13 +306,29 @@ def build_parser():
     download.add_argument("--folder", default="", help="按名称下载时限定素材库")
     download.add_argument("--force", action="store_true", help="覆盖已存在的本地文件")
     download.set_defaults(func=cmd_download)
+
+    # 仅用于 `aigc -h` 列出子命令。真正的参数在 main() 里原样转给 upload_assets。
+    upload = sub.add_parser("upload", aliases=["up"], add_help=False, help="上传本地图片或视频到素材库")
+    upload.add_argument("upload_args", nargs=argparse.REMAINDER)
+    upload.set_defaults(func=cmd_upload)
+
+    # 同样只占位；`aigc pan --help` / `--dest` 由 pan.py 自己解析。
+    pan = sub.add_parser("pan", aliases=["netdisk"], add_help=False, help="上传本地文件或目录到百度网盘")
+    pan.add_argument("pan_args", nargs=argparse.REMAINDER)
+    pan.set_defaults(func=cmd_pan)
     return parser
 
 
 def main(argv=None):
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
     try:
+        # 先截走 upload / pan，避免 argparse 把 --help / --folder / --dest 当成 aigc 自己的参数。
+        if argv and argv[0] in ("upload", "up"):
+            return cmd_upload(argparse.Namespace(upload_args=argv[1:]))
+        if argv and argv[0] in ("pan", "netdisk"):
+            return cmd_pan(argparse.Namespace(pan_args=argv[1:]))
+        parser = build_parser()
+        args = parser.parse_args(argv)
         return args.func(args)
     except SystemExit as error:
         if isinstance(error.code, str) and error.code:
