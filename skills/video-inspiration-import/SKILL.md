@@ -1,11 +1,11 @@
 ---
 name: video-inspiration-import
-description: Download Instagram Reel/post and TikTok video links in the highest available quality, inspect the video, and upload it to AIGC Shelf 灵感收集 with Chinese titles, tags, and the original source URL. Use when the user shares Instagram/instgram/ins or TikTok links to 下载并上传、采集灵感、收藏到灵感库, or continues this established link-to-inspiration workflow. For already downloaded local files use aigc-asset-upload.
+description: Download Instagram Reel/post, TikTok video and WeChat Channels (微信视频号) links in the highest available quality, inspect the video, and upload it to AIGC Shelf 灵感收集 with Chinese titles, tags, and the original source URL. Use when the user shares Instagram/instgram/ins, TikTok or 微信视频号/weixin.qq.com/sph links to 下载并上传、采集灵感、收藏到灵感库, or continues this established link-to-inspiration workflow. For already downloaded local files use aigc-asset-upload.
 ---
 
 # 视频链接采集到灵感库
 
-把用户给出的单条或多条 Instagram/TikTok 视频链接下载到本机，查看画面后命名，调用已有 `aigc-asset-upload` 上传到「灵感收集」。在已约定的链接采集流程里，用户发链接就继续执行。用户明确只要求下载时，止于下载，不上传。
+把用户给出的单条或多条 Instagram/TikTok/微信视频号视频链接下载到本机，查看画面后命名，调用已有 `aigc-asset-upload` 上传到「灵感收集」。在已约定的链接采集流程里，用户发链接就继续执行。用户明确只要求下载时，止于下载，不上传。
 
 ## 入口和依赖
 
@@ -53,6 +53,25 @@ description: Download Instagram Reel/post and TikTok video links in the highest 
    上传复用同仓库 `aigc-asset-upload/scripts/upload_assets.py` 的 Client、登录会话和 SHA-256 去重接口；可用 `AIGC_UPLOAD_SCRIPT` 覆盖脚本位置。保存用户原链接到 `sourceUrl`、平台名到 `source`。服务端已存在相同文件时返回已有素材 ID，不再上传。每项用详情接口回读；新上传的标题、标签、来源与角色字段须与清单一致。已有条目报告服务端实际名称，不自动覆盖元数据；需要纠正时走整理技能。成功回读后只删除 `.identify` 内本流程生成的五张预览图，保留原件、交付副本和状态。未登录时停在本地下载成果，使用现有上传技能恢复会话后重试，不索要 Cookie 内容。
 
 4. 汇报每条链接的实际分辨率、视频编码、是否含音轨、是否生成转码副本、上传名称和素材 ID。分别说明下载原件与交付副本的大小，不能按 MB 大小判断清晰度，也不能将 FFmpeg 解码通过说成已在 QuickTime 实测。`existing` 是命中已有素材，`failed` 是失败，不能混称新增成功。某条失败不影响其它下载成功项；清单的 `errors` 保留失败原因。上传结果按项持续写入 `--results`。
+
+## 微信视频号（WeChat Channels）
+
+视频号没有公开下载接口，链接形如 `https://weixin.qq.com/sph/<id>`。采集靠本机的桌面代理完成，代理是上游 `ltaoo/wx_channels_download` 的 `wx_video_download`（Apple Silicon 与 Intel 包要按架构选，Intel 包只能跑 x86_64）。
+
+- 代理默认 API `http://127.0.0.1:2022`，HTTPS 代理端口 `2023`。`--wx-agent` 可改端口。微信需已登录，系统代理需指向该代理端口，且 MITM 根证书已被系统信任。
+- **必须让微信自己打开视频号页面，代理才能拿到带登录态的 feed。** 做法是把链接发到「文件传输助手」再点开那条消息气泡——不要在搜索框里搜链接再点「访问网页」，搜索面板不会建立视频号页面连接。页面连上后 `GET /api/scraper/platform/status` 的 `wxchannels:page` 才会变为 available。
+- 页面未连接时脚本会直接报错并说明原因，不会静默降级。整条链路不需要用户 Cookie，也不要索取元宝等站点凭据。
+- 下载命令：
+
+  ```bash
+  python3 /path/to/skills/video-inspiration-import/scripts/import_video.py prepare \
+    'https://weixin.qq.com/sph/AFYKmQzHZ0' \
+    --report "$HOME/Downloads/AIGC-Inspiration/weixin-batch.json" \
+    --engine weixin --wx-agent http://127.0.0.1:2022
+  ```
+
+  代理负责解析与解密，脚本按最大分辨率变体下载；1080p 变体通常是 HEVC，会按同一交付策略转成 H.264 yuv420p/AAC 副本，原件保留在 `sourcePath`。`source` 字段写 `视频号`，`sourceUrl` 保存用户给的原始短链。
+- **采集结束必须复原环境**：把系统代理改回用户原有代理，并停掉代理进程；代理会改系统代理设置和装根证书，长期留着会影响其它网络请求。
 
 ## 修复已有本地文件
 

@@ -27,6 +27,9 @@ FORMAT = "bv*+ba/b"
 SORT = "res,fps,br"
 MAX_BYTES = 2 * 1024**3
 DELIVERY_VERSION = 1
+CHANNELS_AGENT_DEFAULT = "http://127.0.0.1:2022"
+# The shelf keeps the platform name as the source label, so every platform needs one.
+SOURCE_LABELS = {"instagram": "Instagram", "tiktok": "TikTok", "weixin": "视频号"}
 
 
 def read_json(path):
@@ -103,7 +106,7 @@ def identify(raw, resolve_short=True):
     url = urlparse(raw.strip())
     host = (url.hostname or "").lower()
     if url.scheme != "https" or url.username or url.password or url.port not in (None, 443):
-        raise ValueError("Use an HTTPS Instagram or TikTok video link")
+        raise ValueError("Use an HTTPS Instagram, TikTok or WeChat Channels video link")
     if host in ("instagram.com", "www.instagram.com", "m.instagram.com"):
         match = re.fullmatch(r"/(reel|reels|p)/([A-Za-z0-9_-]+)/?", url.path)
         if match:
@@ -113,6 +116,10 @@ def identify(raw, resolve_short=True):
         match = re.fullmatch(r"/(@[\w.-]+)/video/(\d+)/?", url.path)
         if match:
             return "tiktok", match[2], f"https://www.tiktok.com/{match[1]}/video/{match[2]}"
+    if host in ("weixin.qq.com", "www.weixin.qq.com"):
+        match = re.fullmatch(r"/sph/([A-Za-z0-9]+)/?", url.path)
+        if match:
+            return "weixin", match[1], f"https://weixin.qq.com/sph/{match[1]}"
     short = host in ("vm.tiktok.com", "vt.tiktok.com") or (
         host in ("www.tiktok.com", "tiktok.com") and url.path.startswith("/t/")
     )
@@ -120,7 +127,7 @@ def identify(raw, resolve_short=True):
         request = Request(raw, headers={"User-Agent": "Mozilla/5.0"})
         with urlopen(request, timeout=30) as response:
             return identify(response.url, resolve_short=False)
-    raise ValueError("Unsupported link; supply a single Instagram Reel/post or TikTok video")
+    raise ValueError("Unsupported link; supply a single Instagram Reel/post, TikTok video or WeChat Channels share link")
 
 
 @contextmanager
@@ -399,6 +406,119 @@ def download_clipdock(platform, url, directory, args):
     }
 
 
+def agent_request(origin, route, body=None, method="GET", timeout=30):
+    """Call the WeChat Channels desktop agent over loopback HTTP."""
+    parsed = urlparse(origin)
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost"):
+        raise ValueError("The WeChat Channels agent must use a loopback HTTP origin")
+    request = Request(
+        origin.rstrip("/") + route, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
+            return json.load(response)
+    except HTTPError as error:
+        try:
+            detail = json.loads(error.read(8192)).get("msg", "")
+        except (ValueError, AttributeError):
+            detail = ""
+        raise RuntimeError(f"Channels agent HTTP {error.code}: {safe_error(detail)}") from None
+
+
+def agent_wait(origin, route, deadline, ready, failed, description):
+    """Poll an agent endpoint until it reports a terminal state."""
+    while True:
+        payload = agent_request(origin, route)
+        state = payload.get("data") or {}
+        if ready(state):
+            return state
+        if failed(state):
+            raise RuntimeError(state.get("message") or state.get("error") or f"{description} failed")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{description} timed out")
+        time.sleep(2)
+
+
+def channels_page_ready(agent):
+    """Report whether the agent holds a live WeChat Channels page."""
+    payload = agent_request(agent, "/api/scraper/platform/status")
+    states = (payload.get("data") or {}).get("statuses") or []
+    page = next((state for state in states if state.get("key") == "wxchannels:page"), None)
+    return bool(page and page.get("available")), page
+
+
+def pick_best_spec(raw):
+    """Choose the largest WeChat Channels variant; WeChat grades its own list by account level."""
+    media = (((raw or {}).get("data") or {}).get("object") or {}).get("objectDesc", {}).get("media") or []
+    specs = media[0].get("spec") if media else None
+    best = None
+    for spec in specs or []:
+        area = int(spec.get("width") or 0) * int(spec.get("height") or 0)
+        rank = (area, int(spec.get("videoBitrate") or 0))
+        if best is None or rank > best[0]:
+            best = (rank, spec.get("fileFormat") or "")
+    return best[1] if best else ""
+
+
+def download_weixin(url, directory, args):
+    """Resolve a WeChat Channels share link through the local desktop agent."""
+    agent = args.wx_agent
+    ready, page = channels_page_ready(agent)
+    if not ready:
+        reason = (page or {}).get("reason") or "等待视频号页面连接"
+        raise RuntimeError(
+            f"视频号页面未连接（{reason}）：在微信里打开该视频号链接后重试")
+    created = agent_request(agent, "/api/scraper/fetch", {"url": url, "force_refresh": True},
+                            method="POST")
+    job = (created.get("data") or {}).get("id")
+    if not job:
+        raise RuntimeError("Channels agent did not return a scrape job id")
+    deadline = time.monotonic() + args.timeout
+    state = agent_wait(agent, f"/api/scraper/job?{urlencode({'id': job})}", deadline,
+                       lambda item: item.get("status") == "completed",
+                       lambda item: item.get("status") == "failed", "视频号解析")
+    raw = ((state.get("output") or {}).get("result")) or {}
+    content = state.get("content") or {}
+    if not raw:
+        raise RuntimeError("Channels agent returned no feed payload for this share link")
+    spec = pick_best_spec(raw)
+    task = agent_request(agent, "/api/v1/download_task/create", {"objects": [{
+        "platform": "wxchannels", "content": raw, "build_from_fetch": True,
+        "filename": "media.mp4", "config": ({"spec": spec} if spec else {}), "auto_start": True,
+    }]}, method="POST")
+    tasks = ((task.get("data") or {}).get("tasks")) or []
+    task_id = ((tasks[0].get("data") or {}).get("id")) if tasks else None
+    if not task_id:
+        raise RuntimeError("Channels agent did not return a download task id")
+    detail = agent_wait(agent, f"/api/v1/download_task/detail?{urlencode({'id': task_id})}",
+                        deadline,
+                        lambda item: item.get("status") == 5,
+                        lambda item: item.get("status") in (6, 7), "视频号下载")
+    files = [item for item in (detail.get("files") or []) if item.get("file_path")]
+    if not files:
+        raise RuntimeError("Channels agent finished without producing a file")
+    source = Path(files[0]["file_path"])
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise RuntimeError("Channels agent download produced no usable file")
+    path = directory / "media.mp4"
+    shutil.copyfile(source, path)
+    author = ((state.get("account") or {}).get("nickname")) or ""
+    media = (((raw.get("data") or {}).get("object") or {}).get("objectDesc", {}).get("media") or [{}])[0]
+    duration = media.get("videoPlayLen")
+    return path, {
+        "engine": "weixin-agent", "remoteId": content.get("external_id") or "",
+        "originalTitle": str(content.get("description") or content.get("title") or "")[:1000],
+        "creator": str(author)[:200],
+        "formatId": spec or "agent-default",
+        "expectedDuration": float(duration) if duration else None,
+        "expectedAudio": True,
+        "qualityPolicy": "largest WeChat Channels variant, then bitrate",
+        "coverUrl": content.get("cover_url") or "",
+    }
+
+
 def prepare_one(raw, args):
     platform, video_id, canonical = identify(raw)
     directory = args.root / platform / video_id
@@ -417,7 +537,10 @@ def prepare_one(raw, args):
             state = {}
             errors = []
             engines = [(args.engine, args)]
-            if args.engine == "auto":
+            if platform == "weixin":
+                # WeChat Channels has no public download API; the desktop agent owns the session.
+                engines = [("weixin-agent", args)]
+            elif args.engine == "auto":
                 engines = [("yt-dlp", args)]
                 if (not args.cookies_from_browser and not args.no_clipdock_cookies
                         and CLIPDOCK_PROFILE.is_dir()):
@@ -433,6 +556,8 @@ def prepare_one(raw, args):
                         attempt = Path(temp)
                         if engine.startswith("yt-dlp"):
                             path, metadata = download_ytdlp(canonical, attempt, engine_args)
+                        elif engine == "weixin-agent":
+                            path, metadata = download_weixin(canonical, attempt, engine_args)
                         else:
                             path, metadata = download_clipdock(platform, canonical, attempt, args)
                         media = probe(path)
@@ -547,7 +672,7 @@ def validate_item(item):
         raise ValueError("This workflow imports into 灵感收集; use aigc-asset-upload for other libraries")
     metadata = {
         "name": name, "tags": tags, "folder": "灵感收集",
-        "source": "Instagram" if state["platform"] == "instagram" else "TikTok",
+        "source": SOURCE_LABELS.get(state["platform"], state["platform"]),
         "sourceUrl": state["sourceUrl"],
         **{key: item[key] for key in ("characterName", "characterCategory", "characterCandidates") if key in item},
     }
@@ -645,7 +770,7 @@ def parse_args():
     download.add_argument("urls", nargs="+")
     download.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     download.add_argument("--report", type=Path, required=True)
-    download.add_argument("--engine", choices=("auto", "yt-dlp", "clipdock"), default="auto")
+    download.add_argument("--engine", choices=("auto", "yt-dlp", "clipdock", "weixin"), default="auto")
     download.add_argument("--proxy", default="")
     download.add_argument("--cookies-from-browser", default="")
     download.add_argument("--no-clipdock-cookies", action="store_true",
@@ -653,6 +778,8 @@ def parse_args():
     download.add_argument("--refresh-download", action="store_true",
                           help="Replace the cached file only after a new download passes validation")
     download.add_argument("--clipdock", default="http://127.0.0.1:3457")
+    download.add_argument("--wx-agent", default=CHANNELS_AGENT_DEFAULT,
+                          help="WeChat Channels desktop agent API origin (loopback only)")
     download.add_argument("--timeout", type=int, default=300)
     download.add_argument("--capture-timeout", type=int, default=150)
     send = sub.add_parser("upload", help="Upload a reviewed manifest, checking server hashes first")

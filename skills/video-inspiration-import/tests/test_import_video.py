@@ -98,6 +98,43 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 workflow.identify(url)
 
+    def test_weixin_share_link_is_identified_and_labelled(self):
+        self.assertEqual(
+            workflow.identify("https://weixin.qq.com/sph/AFYKmQzHZ0"),
+            ("weixin", "AFYKmQzHZ0", "https://weixin.qq.com/sph/AFYKmQzHZ0"),
+        )
+        self.assertEqual(
+            workflow.identify("https://weixin.qq.com/sph/AFYKmQzHZ0?scene=1"),
+            ("weixin", "AFYKmQzHZ0", "https://weixin.qq.com/sph/AFYKmQzHZ0"),
+        )
+        self.assertEqual(workflow.SOURCE_LABELS["weixin"], "视频号")
+        for url in ("https://weixin.qq.com/sph/",
+                    "https://weixin.qq.com/mp/homepage",
+                    "https://weixin.qq.com.evil.test/sph/AFYKmQzHZ0"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                workflow.identify(url)
+
+    def test_weixin_prepare_and_upload_use_the_channels_source_label(self):
+        args = argparse.Namespace(
+            root=self.root, engine="weixin", urls=["https://weixin.qq.com/sph/AFYKmQzHZ0"],
+            report=self.root / "report.json", wx_agent="http://127.0.0.1:2022",
+        )
+        with patch.object(workflow, "download_weixin", side_effect=self.fake_download):
+            item = workflow.prepare_one(args.urls[0], args)
+        self.assertEqual(item["platform"], "weixin")
+        self.assertEqual(item["sourceUrl"], "https://weixin.qq.com/sph/AFYKmQzHZ0")
+        item.update(name="测试视频号", tags=["视频号", "紫色短发", "cosplay"])
+        _, state, _, metadata = workflow.validate_item(item)
+        self.assertEqual(metadata["source"], "视频号")
+        self.assertEqual(metadata["folder"], "灵感收集")
+        self.assertEqual(state["platform"], "weixin")
+
+    def test_agent_origin_must_stay_on_loopback(self):
+        with self.assertRaises(ValueError):
+            workflow.agent_request("http://channels.example.test", "/api/scraper/platform/status")
+        with self.assertRaises(ValueError):
+            workflow.agent_request("https://127.0.0.1:2022", "/api/scraper/platform/status")
+
     def test_real_probe_previews_and_cache_reuse(self):
         item = self.prepare_item()
         self.assertEqual((item["media"]["width"], item["media"]["height"]), (180, 320))
