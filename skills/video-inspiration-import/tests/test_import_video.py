@@ -118,6 +118,7 @@ class WorkflowTests(unittest.TestCase):
         args = argparse.Namespace(
             root=self.root, engine="weixin", urls=["https://weixin.qq.com/sph/AFYKmQzHZ0"],
             report=self.root / "report.json", wx_agent="http://127.0.0.1:2022",
+            keep_channels_page=True,
         )
         with patch.object(workflow, "download_weixin", side_effect=self.fake_download):
             item = workflow.prepare_one(args.urls[0], args)
@@ -128,6 +129,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(metadata["source"], "视频号")
         self.assertEqual(metadata["folder"], "灵感收集")
         self.assertEqual(state["platform"], "weixin")
+
+    def test_weixin_prepare_closes_the_channels_page_unless_kept(self):
+        base = dict(
+            root=self.root, engine="weixin", urls=["https://weixin.qq.com/sph/AFYKmQzHZ0"],
+            report=self.root / "report.json", wx_agent="http://127.0.0.1:2022",
+        )
+        closed = []
+        with patch.object(workflow, "download_weixin", side_effect=self.fake_download), \
+                patch.object(workflow, "close_weixin_channels",
+                             side_effect=lambda *a, **k: closed.append(True) or {"closed": True}):
+            workflow.prepare_one(base["urls"][0], argparse.Namespace(**base, keep_channels_page=False))
+            workflow.prepare_one(base["urls"][0], argparse.Namespace(**base, keep_channels_page=True))
+        # The page is closed once: the second run asked to keep it open.
+        self.assertEqual(len(closed), 1)
 
     def test_agent_origin_must_stay_on_loopback(self):
         with self.assertRaises(ValueError):

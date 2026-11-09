@@ -71,6 +71,11 @@ description: Download Instagram Reel/post, TikTok video and WeChat Channels (微
   ```
 
   `--kind auto`（默认）优先取自己发的绿色气泡，其次取对方气泡；`--kind green` 只认自己发的；`--kind white` 认对方气泡。`--dump` 打印全部候选带及其密度，用于排查「未找到」。微信 4.x 实测色值：自己发的气泡按色相判定（≈#95EC69），**对方气泡是 #EEEEF0（238,238,240）而不是纯白**，聊天面板底色是 #FAFAFA，输入框才是 #FFFFFF。所以纯白不能直接当气泡判据，否则会命中输入框；定位器改为识别带一点冷色调的浅灰，并跳过底部输入框区域，靠「宽度 + 密度」过滤掉图片和反锯齿噪声。
+- **下载完成后要关掉视频号页面**，否则那个标签页会一直带着声音自动播放。`prepare` 默认就会关：它在下载成功后调用 `scripts/weixin_close_channels.py`，在微信侧栏顶部标签条上找到「视频号」标签的绿色小喇叭（播放中）或深色 ✕（空闲），悬停后点同一位置把它关掉，并回读确认标签已消失。关闭失败只记警告，不影响下载结果。要连续处理多条链接、想复用同一次激活，就给 `prepare` 加 `--keep-channels-page`，最后一条下完再单独跑一次关闭脚本：
+
+  ```bash
+  python3 /path/to/skills/video-inspiration-import/scripts/weixin_close_channels.py --json
+  ```
 - 下载命令：
 
   ```bash

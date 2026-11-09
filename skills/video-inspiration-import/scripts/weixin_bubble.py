@@ -33,6 +33,7 @@ carry the avatar on the right, other people's bubbles carry it on the left.
 """
 
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -40,6 +41,22 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+
+def _load_ui():
+    """Reuse the shared desktop helpers from the sibling module."""
+    path = Path(__file__).with_name("wechat_ui.py")
+    spec = importlib.util.spec_from_file_location("wechat_ui", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ui = _load_ui()
+run = ui.run
+run_jxa = ui.run_jxa
+frontmost_window = ui.frontmost_window
+capture = ui.capture
 
 # WeChat's own-message fill is green, but the exact shade differs between the
 # plain bubble and the link bubble, so match on hue instead of RGB.
@@ -67,45 +84,6 @@ MIN_BAND_DENSITY = 0.45
 # The composer occupies the bottom of the chat pane; scanning it only finds
 # the white input box.
 COMPOSER_HEIGHT = 150
-
-
-def run(command, binary=False):
-    result = subprocess.run(command, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(result.stderr.decode("utf-8", "replace")[-600:])
-    return result.stdout if binary else result.stdout.decode("utf-8", "replace")
-
-
-def run_jxa(script):
-    """Run JXA and return its console output, which osascript writes to stderr."""
-    result = subprocess.run(["osascript", "-l", "JavaScript", "-e", script], capture_output=True)
-    if result.returncode:
-        raise RuntimeError(result.stderr.decode("utf-8", "replace")[-600:])
-    return result.stderr.decode("utf-8", "replace")
-
-
-def frontmost_window(app):
-    """Return (x, y, width, height) of the app's front window in logical points."""
-    # Activating through AppleScript is reliable; the JXA property setter is not.
-    run(["osascript", "-e", f'tell application "{app}" to activate'])
-    time.sleep(1.5)
-    script = f'''
-    const se = Application('System Events');
-    const p = se.processes.byName({json.dumps(app)});
-    const w = p.windows[0];
-    const pos = w.position(), size = w.size();
-    console.log(JSON.stringify({{x: pos[0], y: pos[1], w: size[0], h: size[1]}}));
-    '''
-    output = run_jxa(script)
-    return json.loads(output.strip().splitlines()[-1])
-
-
-def capture(region):
-    handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    handle.close()
-    x, y, width, height = region
-    run(["screencapture", "-x", "-R", f"{x},{y},{width},{height}", handle.name])
-    return Path(handle.name)
 
 
 def classify(red, green, blue):
@@ -233,15 +211,7 @@ def main():
                         help="print every detected band as JSON and exit")
     args = parser.parse_args()
     window = frontmost_window(args.app)
-    region = (window["x"], window["y"], window["w"], window["h"])
-    image = capture(region)
-    try:
-        ffmpeg = shutil.which("ffmpeg") or "/Users/simon/.minimax/tools/ffmpeg/bin/ffmpeg"
-        raw = run([ffmpeg, "-v", "error", "-i", str(image), "-vf",
-                   f"scale={window['w']}:{window['h']}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                  binary=True)
-    finally:
-        image.unlink(missing_ok=True)
+    raw = ui.capture_pixels(window)
     pane_bottom = args.pane_bottom
     if pane_bottom is None:
         pane_bottom = max(0, window["h"] - COMPOSER_HEIGHT)

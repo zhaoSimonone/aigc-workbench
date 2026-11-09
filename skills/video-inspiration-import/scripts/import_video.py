@@ -519,6 +519,20 @@ def download_weixin(url, directory, args):
     }
 
 
+def close_weixin_channels(app="WeChat"):
+    """Close the WeChat Channels tab so the page stops playing.
+
+    Clicking a Channels link opens the video in a WeChat side panel tab that
+    keeps autoplaying with sound long after the download finished.  Any
+    failure is reported by the caller but never fails the download.
+    """
+    script = Path(__file__).with_name("weixin_close_channels.py")
+    spec = importlib.util.spec_from_file_location("weixin_close_channels", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.close_channels(app)
+
+
 def prepare_one(raw, args):
     platform, video_id, canonical = identify(raw)
     directory = args.root / platform / video_id
@@ -600,6 +614,15 @@ def prepare_one(raw, args):
                     log(message)
             else:
                 raise RuntimeError("; ".join(errors))
+        if platform == "weixin" and not getattr(args, "keep_channels_page", False):
+            # The Channels tab keeps autoplaying with sound; close it unless the
+            # caller wants the page to stay open for the next link.
+            try:
+                closed = close_weixin_channels()
+                log(f"{platform}/{video_id}: channels page closed={closed.get('closed')} "
+                    f"({closed.get('method') or closed.get('reason')})")
+            except Exception as error:
+                log(f"{platform}/{video_id}: could not close the channels page: {safe_error(error)}")
         if not Path(state.get("preview", directory / "missing")).is_file():
             identify_dir = directory / ".identify"
             identify_dir.mkdir(exist_ok=True)
@@ -780,6 +803,9 @@ def parse_args():
     download.add_argument("--clipdock", default="http://127.0.0.1:3457")
     download.add_argument("--wx-agent", default=CHANNELS_AGENT_DEFAULT,
                           help="WeChat Channels desktop agent API origin (loopback only)")
+    download.add_argument("--keep-channels-page", action="store_true",
+                          help="Leave the WeChat Channels page open after the download "
+                               "(use it to grab several links per activation, close it at the end)")
     download.add_argument("--timeout", type=int, default=300)
     download.add_argument("--capture-timeout", type=int, default=150)
     send = sub.add_parser("upload", help="Upload a reviewed manifest, checking server hashes first")
