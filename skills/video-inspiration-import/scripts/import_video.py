@@ -110,8 +110,11 @@ def identify(raw, resolve_short=True):
     if host in ("instagram.com", "www.instagram.com", "m.instagram.com"):
         match = re.fullmatch(r"/(reel|reels|p)/([A-Za-z0-9_-]+)/?", url.path)
         if match:
-            kind = "p" if match[1] == "p" else "reel"
-            return "instagram", match[2], f"https://www.instagram.com/{kind}/{match[2]}/"
+            # /reel/ and /reels/ are recommendation feeds: the server may answer
+            # with a different video than the one the shortcode names.  /p/ is
+            # the permalink of that exact post, so every shortcode is fetched
+            # through it; the original link is kept in sourceUrl.
+            return "instagram", match[2], f"https://www.instagram.com/p/{match[2]}/"
     if host in ("tiktok.com", "www.tiktok.com", "m.tiktok.com"):
         match = re.fullmatch(r"/(@[\w.-]+)/video/(\d+)/?", url.path)
         if match:

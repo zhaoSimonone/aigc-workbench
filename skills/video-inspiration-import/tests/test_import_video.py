@@ -85,9 +85,15 @@ class WorkflowTests(unittest.TestCase):
 
     def test_link_normalization_and_host_validation(self):
         self.assertEqual(workflow.identify(URL + "?sender=abc"), workflow.identify(URL))
+        # Reels are recommendation feeds and may answer with a different video,
+        # so every shortcode is fetched through the /p/ permalink.
         self.assertEqual(
             workflow.identify("https://www.instagram.com/reels/ABC_123/?share=x"),
-            ("instagram", "ABC_123", "https://www.instagram.com/reel/ABC_123/"),
+            ("instagram", "ABC_123", "https://www.instagram.com/p/ABC_123/"),
+        )
+        self.assertEqual(
+            workflow.identify("https://www.instagram.com/reel/ABC_123/"),
+            ("instagram", "ABC_123", "https://www.instagram.com/p/ABC_123/"),
         )
         self.assertEqual(workflow.identify("https://instagram.com/p/ABC/")[2],
                          "https://www.instagram.com/p/ABC/")
