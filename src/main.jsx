@@ -51,6 +51,7 @@ import {
   Video,
   X,
   Info,
+  TrendingUp,
 } from "lucide-react";
 import ArchivePanel from "./archive-panel.jsx";
 import { useAssetPage, useAssetsById, useDebounced, RemoteAssetPicker, AssetPageControls } from "./asset-browser.jsx";
@@ -407,6 +408,7 @@ function normaliseAsset(asset) {
     musicStatus: asset.musicStatus || "",
     musicConfidence: asset.musicConfidence || "",
     musicEvidence: asset.musicEvidence || "",
+    socialMetrics: asset.socialMetrics && typeof asset.socialMetrics === "object" ? asset.socialMetrics : {},
     parentAssetIds: Array.isArray(asset.parentAssetIds) ? asset.parentAssetIds : [],
     derivedAssetIds: Array.isArray(asset.derivedAssetIds) ? asset.derivedAssetIds : [],
   };
@@ -2749,6 +2751,15 @@ function AssetCard({ asset, onOpen, onFavorite, list, priority = false }) {
   );
 }
 
+const SOCIAL_METRIC_FIELDS = [
+  ["like", "点赞"],
+  ["comment", "评论"],
+  ["repost", "转发"],
+  ["share", "分享"],
+  ["save", "收藏"],
+  ["play", "播放"],
+];
+
 function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTagsUpdated, onEdit, onDelete, onNavigate, onBack, onAssetUpdated, onDownload }) {
   const [editingTags, setEditingTags] = useState(false);
   const [tagsText, setTagsText] = useState(asset.tags.join(" "));
@@ -2762,6 +2773,7 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
   const [editingCommentId, setEditingCommentId] = useState("");
   const [editingCommentText, setEditingCommentText] = useState("");
   const isCreation = asset.folder === "我的创作" || asset.folder === "成片";
+  const hasSocialMetrics = SOCIAL_METRIC_FIELDS.some(([key]) => typeof asset.socialMetrics?.[key] === "number");
   useEffect(() => {
     setTagsText(asset.tags.join(" "));
     setEditingTags(false);
@@ -2978,6 +2990,30 @@ function DetailDrawer({ asset, allAssets = [], onClose, onFavorite, onUsed, onTa
                 {asset.musicConfidence ? `（置信度：${asset.musicConfidence}）` : ""}
               </p>
               {asset.musicEvidence && <small>{asset.musicEvidence}</small>}
+            </div>
+          )}
+          {hasSocialMetrics && (
+            <div className="detail-note">
+              <div className="note-label"><TrendingUp size={14} />平台社交数据</div>
+              <div className="social-metrics-grid">
+                {SOCIAL_METRIC_FIELDS.map(([key, label]) => (
+                  <div className="social-metric" key={key}>
+                    <span className="social-metric-label">{label}</span>
+                    <span className="social-metric-value">
+                      {typeof asset.socialMetrics[key] === "number"
+                        ? asset.socialMetrics[key].toLocaleString("zh-CN")
+                        : "未提供"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="social-metrics-captured">
+                采集于 {asset.socialMetrics.capturedAt
+                  ? new Date(asset.socialMetrics.capturedAt).toLocaleString("zh-CN")
+                  : "未知时间"}
+                {asset.socialMetrics.platform ? ` · 来源 ${asset.socialMetrics.platform}` : ""}
+                ，为抓取当时快照。
+              </p>
             </div>
           )}
           {isCreation && (

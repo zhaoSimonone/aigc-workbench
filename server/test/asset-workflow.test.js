@@ -101,5 +101,37 @@ async function request(route, { body = {}, params = { id }, query: queryParams =
   row = { ...row, source_url: 'url', folder: '灵感收集', duration_seconds: 12 };
   const similar = await request('GET /api/assets', { query: { similarTo: id } });
   assert.ok(similar.result.assets[0].similarityReasons.includes('sameSourceUrl'));
-  console.log('Asset API workflow: detail, paging, legacy compatibility, lint, conflict, batch and candidates passed');
+
+  // 社交计数快照：结构固定，null 表示平台未提供，不等于 0。
+  row.social_metrics = { platform: 'instagram', capturedAt: '2026-11-10T09:35:12Z',
+    source: 'instagram-mobile-info', like: 596, comment: 6, repost: 11, share: 41, save: 194, play: 6762 };
+  queries = [];
+  const metricsWrite = await request('PATCH /api/assets/:id/organize', {
+    body: { socialMetrics: { platform: 'instagram', capturedAt: '2026-11-10T09:35:12Z',
+      source: 'instagram-mobile-info', like: 596, comment: 6, repost: 11, share: 41, save: 194, play: 6762 } },
+  });
+  assert.equal(metricsWrite.status, 200);
+  const metricsUpdate = queries.find(({ sql }) => sql.startsWith('UPDATE assets SET'));
+  assert.ok(metricsUpdate.sql.includes('social_metrics=$'));
+  assert.deepEqual(JSON.parse(metricsUpdate.params.at(-3)), row.social_metrics);
+  // 未知字段、负数、小数、数组都必须被拒绝。
+  for (const bad of [
+    { socialMetrics: { like: 1, unknown: 2 } },
+    { socialMetrics: { like: -1 } },
+    { socialMetrics: { like: 1.5 } },
+    { socialMetrics: [1, 2] },
+    { socialMetrics: 'not-json' },
+  ]) {
+    await assert.rejects(request('PATCH /api/assets/:id/organize', { body: bad }));
+  }
+  // 并发校验也看社交计数：快照不一致要 409。
+  assert.equal((await request('PATCH /api/assets/:id/organize', {
+    body: { name: '新名称', before: { socialMetrics: { like: 1 } } },
+  })).status, 409);
+  assert.equal((await request('PATCH /api/assets/:id/organize', {
+    body: { name: '新名称', before: { socialMetrics: row.social_metrics } },
+  })).status, 200);
+  // 回读映射：素材详情返回 socialMetrics，而不是数据库列名。
+  assert.ok(source.includes('socialMetrics: row.social_metrics || {}'));
+  console.log('Asset API workflow: detail, paging, legacy compatibility, lint, conflict, batch, candidates and social counts passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

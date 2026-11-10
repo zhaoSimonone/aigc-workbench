@@ -368,6 +368,44 @@ function parseCharacterCandidates(value) {
     ({ work: work.trim(), name: name.trim(), evidence: evidence.trim(), confidence, confirmed }));
 }
 
+// 社交计数快照：点赞/评论/转发/分享/收藏/播放。
+// null 表示平台没有下发该指标，不等于 0；capturedAt 是抓取时刻，不是素材创建时间。
+const SOCIAL_METRIC_KEYS = ['like', 'comment', 'repost', 'share', 'save', 'play'];
+const SOCIAL_METRIC_INFO_KEYS = ['platform', 'capturedAt', 'source'];
+
+function parseSocialMetrics(value) {
+  if (value === undefined || value === null) return {};
+  let metrics = value;
+  if (typeof value === 'string') {
+    try { metrics = JSON.parse(value); } catch (_) { metrics = null; }
+  }
+  if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) {
+    throw Object.assign(new Error('社交计数应为对象'), { statusCode: 400 });
+  }
+  const unknown = Object.keys(metrics).filter((key) =>
+    !SOCIAL_METRIC_KEYS.includes(key) && !SOCIAL_METRIC_INFO_KEYS.includes(key));
+  if (unknown.length) {
+    throw Object.assign(new Error(`社交计数含未知字段：${unknown.join('、')}`), { statusCode: 400 });
+  }
+  const result = {};
+  for (const key of SOCIAL_METRIC_INFO_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(metrics, key)) continue;
+    const limit = key === 'platform' ? 40 : key === 'source' ? 120 : 40;
+    const text = String(metrics[key] || '').trim().slice(0, limit);
+    if (text) result[key] = text;
+  }
+  for (const key of SOCIAL_METRIC_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(metrics, key)) continue;
+    const item = metrics[key];
+    if (item === null) { result[key] = null; continue; }
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > 1e12) {
+      throw Object.assign(new Error(`社交计数 ${key} 必须是非负整数或 null`), { statusCode: 400 });
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
 async function readMediaMetadata(filePath) {
   try {
     const { stdout } = await execFileAsync(ffprobePath, ['-v', 'error', '-show_streams', '-of', 'json', filePath], { timeout: 60000 });
@@ -445,6 +483,7 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
   const folder = normalizeFolder(metadata.folder);
   const characterCategory = String(metadata.characterCategory || '').trim().slice(0, 40);
   const characterCandidates = parseCharacterCandidates(metadata.characterCandidates);
+  const socialMetrics = parseSocialMetrics(metadata.socialMetrics);
   let name = String(metadata.name ?? path.basename(originalName, path.extname(originalName))).trim();
   const validation = validateAssetMetadata({ name, tags, folder, requireTags: true });
   if (metadata.strictMetadata && validation.length) {
@@ -466,10 +505,10 @@ async function persistAsset({ userId, tempPath, originalName, mimeType, metadata
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata,social_metrics)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
         [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, fs.statSync(tempPath).size, sha256, durationSeconds, folder, metadata.used === true || String(metadata.used) === 'true', '新上传素材，等待补充备注。',
-          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath))],
+          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath)), JSON.stringify(socialMetrics)],
       );
       for (const tag of tags.length ? tags : ['待整理']) {
         const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
@@ -508,7 +547,7 @@ function isGifMime(mimeType) {
   return String(mimeType || '').split(';')[0].trim().toLowerCase() === 'image/gif';
 }
 
-async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, characterCandidates = [], folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
+async function ingestAsset({ userId, tempPath, objectKey, type, name, source, sourceUrl, characterName, characterCategory, characterCandidates = [], socialMetrics = {}, folder, used, tags, parentIds, mimeType, sizeBytes, deleteObjectsOnFailure }) {
   let thumbKey = null;
   try {
     const preview = await createAssetPreview(type, tempPath, objectKey, 'Uploaded asset', mimeType);
@@ -522,10 +561,10 @@ async function ingestAsset({ userId, tempPath, objectKey, type, name, source, so
         await client.query('INSERT INTO character_albums(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO NOTHING', [userId, characterName]);
       }
       const { rows } = await client.query(
-        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+        `INSERT INTO assets(user_id,name,type,source,source_url,character_name,character_category,object_key,thumb_key,content_type,size_bytes,sha256,duration_seconds,folder,used,note,character_candidates,media_metadata,social_metrics)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
         [userId, name, type, source, sourceUrl, characterName, characterCategory, objectKey, thumbKey, mimeType, sizeBytes, sha256, durationSeconds, folder, used, '新上传素材，等待补充备注。',
-          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath))],
+          JSON.stringify(characterCandidates), JSON.stringify(await readMediaMetadata(tempPath)), JSON.stringify(socialMetrics)],
       );
       for (const tag of tags.length ? tags : ['待整理']) {
         const tagRow = await client.query('INSERT INTO tags(user_id,name) VALUES($1,$2) ON CONFLICT(user_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id', [userId, tag]);
@@ -570,6 +609,7 @@ async function hydrateAsset(row) {
     characterCategory: row.character_category || '',
     characterCandidates: row.character_candidates || [],
     mediaMetadata: row.media_metadata || {},
+    socialMetrics: row.social_metrics || {},
     src: url,
     streamUrl: row.type === 'video' ? url : '',
     directUrl: row.type === 'video' ? '' : url,
@@ -1473,6 +1513,7 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
     if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
     if (!strictMetadata(req)) name = safeName(name);
     const characterCandidates = parseCharacterCandidates(req.body.characterCandidates);
+    const socialMetrics = parseSocialMetrics(req.body.socialMetrics);
     const objectKey = `${req.user.id}/${type}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${safeName(originalFilename)}`;
     await putObject(objectKey, tempPath, req.file.mimetype, mediaCacheControl);
     const asset = await ingestAsset({
@@ -1486,6 +1527,7 @@ app.post('/api/assets', requireUser, upload.single('file'), async (req, res, nex
       characterName: String(req.body.characterName || '').trim().slice(0, 120),
       characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
       characterCandidates,
+      socialMetrics,
       folder,
       used: req.body.used === 'true',
       tags,
@@ -1559,6 +1601,7 @@ app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
     if (strictMetadata(req) && validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
     if (!strictMetadata(req)) name = safeName(name);
     const characterCandidates = parseCharacterCandidates(req.body.characterCandidates);
+    const socialMetrics = parseSocialMetrics(req.body.socialMetrics);
     tempPath = path.join(uploadDir, `${crypto.randomUUID()}-${safeName(originalName)}`);
     await downloadObject(objectKey, tempPath);
     const asset = await ingestAsset({
@@ -1572,6 +1615,7 @@ app.post('/api/assets/finalize-upload', requireUser, async (req, res, next) => {
       characterName: String(req.body.characterName || '').trim().slice(0, 120),
       characterCategory: String(req.body.characterCategory || '').trim().slice(0, 40),
       characterCandidates,
+      socialMetrics,
       folder,
       used: req.body.used === true || req.body.used === 'true',
       tags,
@@ -1753,7 +1797,7 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
       });
       if (validation.length) return res.status(400).json({ error: '素材元数据校验失败', fields: validation });
     }
-    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory', 'musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence'];
+    const allowed = ['favorite', 'used', 'note', 'folder', 'name', 'source', 'sourceUrl', 'characterName', 'characterCategory', 'musicTitle', 'musicArtist', 'musicSource', 'musicStatus', 'musicConfidence', 'musicEvidence', 'socialMetrics'];
     const hasParentAssetIds = Object.prototype.hasOwnProperty.call(req.body, 'parentAssetIds');
     const requestedParentAssetIds = hasParentAssetIds ? parseTags(req.body.parentAssetIds) : [];
     if (hasParentAssetIds && requestedParentAssetIds.some((id) => !uuidPattern.test(String(id)))) {
@@ -1785,7 +1829,9 @@ app.patch('/api/assets/:id', requireUser, async (req, res, next) => {
               ? String(req.body[key] || '').trim().slice(0, key === 'musicEvidence' ? 1000 : 200)
             : key === 'folder'
               ? normalizeFolder(req.body[key])
-              : req.body[key];
+              : key === 'socialMetrics'
+                ? JSON.stringify(parseSocialMetrics(req.body[key]))
+                : req.body[key];
         values.push(value);
         fields.push(`${dbKey}=$${values.length}`);
       }
@@ -1973,6 +2019,7 @@ async function organizeAsset(req, res, next) {
     ['favorite', 'favorite', (value) => value],
     ['used', 'used', (value) => value],
     ['characterCandidates', 'character_candidates', (value) => JSON.stringify(parseCharacterCandidates(value))],
+    ['socialMetrics', 'social_metrics', (value) => JSON.stringify(parseSocialMetrics(value))],
     ['note', 'note', (value) => String(value || '').trim().slice(0, 5000)],
     ['folder', 'folder', (value) => normalizeFolder(value, '')],
     ['source', 'source', (value) => String(value || '').trim().slice(0, 120)],

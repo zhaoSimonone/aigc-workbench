@@ -14,6 +14,7 @@
 | `characterName` | 已确认角色名，最多 120 字符；未确认留空 | 是 | 是 |
 | `characterCategory` | 角色分类，最多 40 字符 | 是 | 是 |
 | `characterCandidates` | 最多 5 个候选，结构见下文；空数组清空 | 是 | 是 |
+| `socialMetrics` | 平台社交计数快照，结构见下文；空对象清空 | 是 | 是 |
 | `used` | boolean | 是 | 是 |
 | `favorite` | boolean | 否 | 是 |
 | `note` | 备注，最多 5000 字符 | 否 | 是 |
@@ -47,6 +48,30 @@ JSON 写入使用原生数组/布尔值；multipart 上传的数组字段使用 
 
 `GET /api/assets?characterWork=海贼王&characterName=汉库克&confirmedCharacter=true&limit=10` 查询同一候选同时符合条件的已确认参考素材。单独 `characterName` 查询顶层已确认角色字段。旧素材不会被自动标记为已确认；需实际看画面后整理补齐。
 
+## 社交计数快照
+
+`socialMetrics` 记录来源平台在采集时刻的互动数据，供剪辑时挑素材用：
+
+```json
+{
+  "platform": "instagram",
+  "capturedAt": "2026-11-10T09:35:12Z",
+  "source": "instagram-mobile-info",
+  "like": 596,
+  "comment": 6,
+  "repost": 11,
+  "share": 41,
+  "save": 194,
+  "play": 6762
+}
+```
+
+- `platform` 最多 40 字符，`source` 最多 120 字符，`capturedAt` 是 ISO 时间戳（抓取时刻，不是素材创建时间）。
+- 六个计数字段 `like/comment/repost/share/save/play` 取值是**非负整数或 null**。null 表示该平台没有下发这个指标，不等于 0：TikTok 不区分转发与分享，所以它的 `repost` 恒为 null；Instagram 极冷门帖子可能不下发转发数。
+- 未知字段、负数、小数、数组都会被服务端拒绝（HTTP 400）。
+- 这是抓取时刻的快照，会随时间变化；要最新数据用 `video-inspiration-import` 的 `metrics` 子命令重抓并回写。
+- 服务端只保存数值，不判断互动高低，也不据此给素材排序。
+
 ## 读取字段
 
 详情返回 `{"asset":{...}}`；列表返回 `{assets:Asset[],total:number,limit:number|null,offset:number,hasMore:boolean}`。上传、详情、整理和列表中的素材使用相同结构：
@@ -58,6 +83,7 @@ JSON 写入使用原生数组/布尔值；multipart 上传的数组字段使用 
 | `sha256`, `sizeBytes`, `durationSeconds`, `createdAt` | 文件哈希、字节数、秒数（未知为 null）、ISO 创建时间 |
 | `size`, `duration`, `date` | 兼容网页的人读显示字段，不用于数值比较 |
 | `mediaMetadata` | 新上传/替换时 ffprobe 的 `width/height/videoCodec/pixelFormat/audioCodecs`；探测失败为 `{"probeFailed":true}`，旧素材为 `{}` |
+| `socialMetrics` | 平台社交计数快照，结构见上文；没有采集过为 `{}` |
 | `streamUrl` | 视频的需鉴权相对路径，返回 307 重定向；图片为空 |
 | `directUrl` | 图片/GIF 原文件的签名直链，视频为空；视频取 `/download-url` |
 | `thumbUrl`, `thumb` | 封面签名直链，没有封面时为空 |

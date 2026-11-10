@@ -63,6 +63,9 @@ ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_confidence TEXT NOT NULL DEFAU
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS music_evidence TEXT NOT NULL DEFAULT '';
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS character_candidates JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS media_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- 平台社交计数快照：点赞/评论/转发/分享/收藏/播放。
+-- null 表示该平台未提供该指标（例如 TikTok 不区分转发与分享），不是 0。
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS social_metrics JSONB NOT NULL DEFAULT '{}'::jsonb;
 UPDATE assets SET folder='我的创作' WHERE folder='成片';
 CREATE INDEX IF NOT EXISTS assets_user_created_idx ON assets(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assets_user_live_page_idx ON assets(user_id, created_at DESC, id DESC) WHERE deleted_at IS NULL;

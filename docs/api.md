@@ -48,7 +48,7 @@ GET /api/assets?similarTo=<UUID>&limit=10
 
 ## 上传和替换
 
-元数据使用共享字段表；上传支持 `name/source/sourceUrl/tags/used/folder/characterName/characterCategory/characterCandidates/parentAssetIds`。`note` 与音乐字段需上传后整理。服务端保留上传的文件字节；兼容转码在本地技能完成。
+元数据使用共享字段表；上传支持 `name/source/sourceUrl/tags/used/folder/characterName/characterCategory/characterCandidates/socialMetrics/parentAssetIds`。`note` 与音乐字段需上传后整理。服务端保留上传的文件字节；兼容转码在本地技能完成。
 
 | 请求 | 请求体 | 成功响应 |
 | --- | --- | --- |
@@ -122,7 +122,9 @@ Comment 结构：`{id,assetId,content,author,createdAt,updatedAt}`。
 
 ## 部署和验证边界
 
-启动服务时执行 `server/schema.sql`，幂等新增 `character_candidates JSONB DEFAULT '[]'` 和 `media_metadata JSONB DEFAULT '{}'`。旧素材不自动重下载、不回填角色确认、不改标题标签。
+启动服务时执行 `server/schema.sql`，幂等新增 `character_candidates JSONB DEFAULT '[]'`、`media_metadata JSONB DEFAULT '{}'` 和 `social_metrics JSONB DEFAULT '{}'`。旧素材不自动重下载、不回填角色确认、不改标题标签。
+
+`social_metrics` 保存来源平台的社交计数快照（点赞/评论/转发/分享/收藏/播放），字段为非负整数或 null，null 表示平台未提供该指标；`capturedAt` 是抓取时刻。结构见共享字段表。计数由本地 `video-inspiration-import` 采集并随上传写入；`PATCH /api/assets/:id/organize` 也可单独回写，用于刷新快照。服务端不判断互动高低，也不据此排序。
 
 完整音视频解码与静音/音量分析由本地 `import_video.py verify` 生成结构化报告，prepare 把报告和哈希写入 state。服务端 mediaMetadata 只表示 ffprobe 参数，不能据此声称音频听感正常。需要持久化检查结论时，可先生成 note 的 diff，再经整理流程写入；不会塞入音乐识别字段。
 

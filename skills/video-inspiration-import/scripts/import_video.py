@@ -19,6 +19,9 @@ from urllib.parse import urlparse, urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import social_metrics
+
 
 HOME = Path.home()
 DEFAULT_ROOT = HOME / "Downloads" / "AIGC-Inspiration"
@@ -100,6 +103,60 @@ def run(command, timeout=300):
     if result.returncode:
         raise RuntimeError(safe_error(result.stderr or result.stdout or f"exit {result.returncode}"))
     return result.stdout
+
+
+class SocialCollector:
+    """按批次缓存浏览器登录态，逐条采集平台社交计数。
+
+    登录态只导出一次；导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），
+    真正联网的只有 Instagram 的计数接口。
+    """
+
+    def __init__(self, args):
+        self.args = args
+        self._cookie_text = None
+
+    def cookies(self, domain="instagram.com"):
+        if self._cookie_text is None:
+            self._cookie_text = social_metrics.export_browser_cookies(
+                getattr(self.args, "cookies_from_browser", ""), tool("yt-dlp"),
+                proxy=getattr(self.args, "proxy", "") or None,
+                timeout=getattr(self.args, "timeout", 300))
+        return social_metrics.parse_cookie_jar(self._cookie_text, domain)
+
+    def instagram(self, shortcode):
+        return social_metrics.collect_instagram(
+            shortcode, self.cookies("instagram.com"), proxy=getattr(self.args, "proxy", "") or None,
+            timeout=getattr(self.args, "metrics_timeout", 40))
+
+    def tiktok(self, url):
+        return social_metrics.collect_tiktok(tiktok_info(url, self.args))
+
+
+def social_collector(args):
+    """取当前批次的采集器，同一批次复用同一份登录态。"""
+    collector = getattr(args, "_social_collector", None)
+    if collector is None:
+        collector = SocialCollector(args)
+        setattr(args, "_social_collector", collector)
+    return collector
+
+
+def tiktok_info(url, args):
+    """只取 yt-dlp 的 info，不下载媒体；用于刷新 TikTok 计数。"""
+    command = [tool("yt-dlp"), "--ignore-config", "--no-playlist", "--no-warnings",
+               "--skip-download", "--print", "%()j"]
+    if getattr(args, "proxy", ""):
+        command += ["--proxy", args.proxy]
+    if getattr(args, "cookies_from_browser", ""):
+        command += ["--cookies-from-browser", args.cookies_from_browser]
+    command += ["--", url]
+    output = run(command, getattr(args, "timeout", 300))
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise ValueError("yt-dlp did not return TikTok info")
 
 
 def identify(raw, resolve_short=True):
@@ -328,6 +385,16 @@ def download_ytdlp(url, directory, args):
     path = Path(info["filepath"]).resolve()
     if path.parent != directory.resolve() or not path.is_file():
         raise ValueError("Downloader did not produce a file in the expected directory")
+    # 社交计数：TikTok 的点赞/评论/分享/收藏/播放随 info 一起返回，直接取用，不再发请求；
+    # Instagram 只有点赞和评论在 info 里，完整六项由 prepare 阶段的 REST 采集补齐。
+    counts = social_metrics.collect_tiktok(info) if getattr(args, "platform", "") == "tiktok" else {
+        "like": info.get("like_count"), "comment": info.get("comment_count"),
+        "repost": None, "share": None, "save": None, "play": None,
+    }
+    metrics = {}
+    if social_metrics.has_metrics(counts):
+        source = social_metrics.SOURCE_TIKTOK if getattr(args, "platform", "") == "tiktok" else "instagram-ytdlp"
+        metrics = social_metrics.build_snapshot(getattr(args, "platform", "") or "instagram", counts, source)
     # Retain descriptive metadata only, never signed CDN URLs, cookies or request headers.
     return path, {
         "engine": "yt-dlp", "remoteId": str(info.get("id", "")),
@@ -336,6 +403,7 @@ def download_ytdlp(url, directory, args):
         "formatId": info.get("format_id"), "expectedDuration": info.get("duration"),
         "expectedAudio": info.get("acodec") not in (None, "none"),
         "qualityPolicy": "highest available resolution, then fps and bitrate",
+        "socialMetrics": metrics,
     }
 
 
@@ -572,6 +640,7 @@ def prepare_one(raw, args):
                     with tempfile.TemporaryDirectory(prefix="attempt-", dir=directory) as temp:
                         attempt = Path(temp)
                         if engine.startswith("yt-dlp"):
+                            engine_args.platform = platform
                             path, metadata = download_ytdlp(canonical, attempt, engine_args)
                         elif engine == "weixin-agent":
                             path, metadata = download_weixin(canonical, attempt, engine_args)
@@ -617,6 +686,18 @@ def prepare_one(raw, args):
                     log(message)
             else:
                 raise RuntimeError("; ".join(errors))
+        if platform == "instagram" and not getattr(args, "no_social_metrics", False):
+            # Instagram 的六项计数要单独走移动端 REST 接口；抓不到不阻断下载，
+            # 缺失原因留在 state 里，事后可以用 metrics 子命令补抓。
+            try:
+                counts = social_collector(args).instagram(video_id)
+                state["socialMetrics"] = social_metrics.build_snapshot(
+                    "instagram", counts, social_metrics.SOURCE_INSTAGRAM)
+                state.pop("socialMetricsError", None)
+                log(f"{platform}/{video_id}: social metrics {state['socialMetrics']}")
+            except Exception as error:
+                state["socialMetricsError"] = safe_error(error)
+                log(f"{platform}/{video_id}: social metrics unavailable: {safe_error(error)}")
         if platform == "weixin" and not getattr(args, "keep_channels_page", False):
             # The Channels tab keeps autoplaying with sound; close it unless the
             # caller wants the page to stay open for the next link.
@@ -702,6 +783,9 @@ def validate_item(item):
         "sourceUrl": state["sourceUrl"],
         **{key: item[key] for key in ("characterName", "characterCategory", "characterCandidates") if key in item},
     }
+    metrics = item.get("socialMetrics") or state.get("socialMetrics") or {}
+    if metrics:
+        metadata["socialMetrics"] = metrics
     return state_file, state, path, metadata
 
 
@@ -721,17 +805,25 @@ def upload_one(item, client):
         if not isinstance(asset, dict) or not asset.get("id"):
             raise RuntimeError("Server response did not contain an asset ID; rerun to reconcile by hash")
         asset = client.get_asset(asset["id"])
+        warnings = []
         if status == "uploaded":
             for key, value in metadata.items():
+                if key == "socialMetrics" and not asset.get("socialMetrics"):
+                    # 服务端还没上线 social_metrics 列：保留本地快照，不阻断上传，
+                    # 上线后用 metrics 子命令回填即可。
+                    warnings.append("服务端尚未支持 socialMetrics 字段，计数只保留在本地")
+                    continue
                 equal = set(asset.get(key, [])) == set(value) if key == "tags" else asset.get(key) == value
                 if not equal:
                     raise RuntimeError(f"Uploaded metadata differs on readback: {key}; rerun to reconcile")
         receipt = {key: asset[key] for key in
-                   ("id", "name", "tags", "folder", "sourceUrl", "characterName", "characterCategory", "characterCandidates") if key in asset}
+                   ("id", "name", "tags", "folder", "sourceUrl", "characterName", "characterCategory",
+                    "characterCandidates", "socialMetrics") if key in asset}
         state["asset"] = receipt
         write_json(state_file, state)
         cleanup_previews(state_file.parent)
-        return {"status": status, "path": str(path), "asset": receipt, "media": state["media"]}
+        return {"status": status, "path": str(path), "asset": receipt, "media": state["media"],
+                "warning": "; ".join(warnings)}
 
 
 def upload(args):
@@ -789,6 +881,69 @@ def refresh(args):
     return int(bool(errors))
 
 
+def metrics(args):
+    """重新采集平台社交计数，并回写已上传的素材。
+
+    计数是抓取时刻的快照，剪辑决策通常发生在下载之后，所以提供独立入口重抓。
+    """
+    report = read_json(args.manifest)
+    items = report.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("Manifest has no prepared videos")
+    uploader = load_uploader()
+    client = uploader.Client(args.api or uploader.DEFAULT_API, args.cookie_file or uploader.DEFAULT_COOKIE_FILE)
+    client.require("GET", "/api/auth/me")
+    collector = social_collector(args)
+    results = []
+    for item in items:
+        try:
+            state_file = Path(item["stateFile"]).expanduser().resolve()
+            with locked(state_file.parent):
+                state = read_json(state_file)
+                platform = state.get("platform", "")
+                if platform == "instagram":
+                    counts = collector.instagram(state.get("videoId", ""))
+                elif platform == "tiktok":
+                    counts = collector.tiktok(state.get("canonicalUrl") or state.get("sourceUrl"))
+                else:
+                    raise ValueError(f"平台 {platform or '未知'} 没有可采集的社交计数")
+                snapshot = social_metrics.build_snapshot(
+                    platform, counts,
+                    social_metrics.SOURCE_INSTAGRAM if platform == "instagram" else social_metrics.SOURCE_TIKTOK)
+                if not social_metrics.has_metrics(snapshot):
+                    raise RuntimeError("平台没有返回任何计数")
+                state["socialMetrics"] = snapshot
+                state.pop("socialMetricsError", None)
+                write_json(state_file, state)
+                item["socialMetrics"] = snapshot
+                asset_id = state.get("asset", {}).get("id")
+                pushed = None
+                push_error = ""
+                if asset_id:
+                    try:
+                        body = json.dumps({"socialMetrics": snapshot}).encode("utf-8")
+                        status, payload = client.request(
+                            "PATCH", f"/api/assets/{asset_id}/organize", body, {"Content-Type": "application/json"})
+                        if status != 200:
+                            raise RuntimeError(f"服务端拒绝写入社交计数：HTTP {status} {payload.get('error', '')}")
+                        pushed = (payload.get("asset") or {}).get("socialMetrics")
+                        if not pushed:
+                            raise RuntimeError("服务端没有回读 socialMetrics，可能尚未上线该字段")
+                        item.setdefault("asset", {})["socialMetrics"] = pushed
+                    except Exception as error:
+                        # 服务端还没上线该字段时，本地快照仍然保留，只是没写回线上。
+                        push_error = safe_error(error)
+            results.append({"status": "updated" if not push_error else "local-only",
+                            "platform": platform, "assetId": asset_id,
+                            "socialMetrics": snapshot, "pushed": pushed, "error": push_error})
+        except Exception as error:
+            results.append({"status": "failed", "sourceUrl": item.get("sourceUrl"), "error": safe_error(error)})
+        write_json(args.manifest, report)
+        write_json(args.results, {"results": results})
+    print(json.dumps({"results": results, "resultsFile": str(args.results)}, ensure_ascii=False, indent=2))
+    return int(any(result["status"] == "failed" for result in results))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -809,6 +964,9 @@ def parse_args():
     download.add_argument("--keep-channels-page", action="store_true",
                           help="Leave the WeChat Channels page open after the download "
                                "(use it to grab several links per activation, close it at the end)")
+    download.add_argument("--no-social-metrics", action="store_true",
+                          help="Do not collect platform social counts (likes, comments, shares, saves)")
+    download.add_argument("--metrics-timeout", type=int, default=40)
     download.add_argument("--timeout", type=int, default=300)
     download.add_argument("--capture-timeout", type=int, default=150)
     send = sub.add_parser("upload", help="Upload a reviewed manifest, checking server hashes first")
@@ -826,6 +984,15 @@ def parse_args():
     sync.add_argument("--manifest", type=Path, required=True)
     sync.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
     sync.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
+    counts = sub.add_parser("metrics", help="Re-collect platform social counts and write them back")
+    counts.add_argument("--manifest", type=Path, required=True)
+    counts.add_argument("--results", type=Path, required=True)
+    counts.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
+    counts.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
+    counts.add_argument("--proxy", default="")
+    counts.add_argument("--cookies-from-browser", default="")
+    counts.add_argument("--timeout", type=int, default=300)
+    counts.add_argument("--metrics-timeout", type=int, default=40)
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
         if getattr(args, field, None) is not None:
@@ -841,6 +1008,8 @@ def main():
         return upload(args)
     if args.action == "refresh":
         return refresh(args)
+    if args.action == "metrics":
+        return metrics(args)
     if args.action == "verify":
         report = verify_media(args.input.expanduser().resolve())
         if args.report:

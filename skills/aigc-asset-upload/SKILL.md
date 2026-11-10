@@ -242,4 +242,4 @@ aigc pan upload ./成片.mp4 /AIGC/1106视频/成片 --dry-run
 
 ## API 与机器校验
 
-上传、整理、视频导入共用 [API 字段契约](references/asset-api.md)。技能上传发送 `curated-v1` 策略，标题 1–32 字、不含 `·`/`.`，标签 3–5 个；默认「待整理」不能通过上传校验，须先按画面完成命名。文件夹从服务端读取，服务端未升级时兼容旧列表。详情用 `get_asset(id)` 回读，tags 按集合比较；`check-hashes` 返回键为 `assets`。角色候选可在 manifest 中填 `characterCandidates`，只有证据充分时标为 confirmed。
+上传、整理、视频导入共用 [API 字段契约](references/asset-api.md)。技能上传发送 `curated-v1` 策略，标题 1–32 字、不含 `·`/`.`，标签 3–5 个；默认「待整理」不能通过上传校验，须先按画面完成命名。文件夹从服务端读取，服务端未升级时兼容旧列表。详情用 `get_asset(id)` 回读，tags 按集合比较；`check-hashes` 返回键为 `assets`。角色候选可在 manifest 中填 `characterCandidates`，只有证据充分时标为 confirmed。平台社交计数快照用 `socialMetrics` 承载，字段结构见契约文档；值是整数或 null，null 表示平台未提供该指标。

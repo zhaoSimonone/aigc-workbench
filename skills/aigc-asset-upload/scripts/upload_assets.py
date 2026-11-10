@@ -238,6 +238,8 @@ class Client(ShelfClient):
             fields["parentAssetIds"] = json.dumps(metadata["parentAssetIds"])
         if "characterCandidates" in metadata:
             fields["characterCandidates"] = json.dumps(metadata["characterCandidates"], ensure_ascii=False)
+        if metadata.get("socialMetrics"):
+            fields["socialMetrics"] = json.dumps(metadata["socialMetrics"], ensure_ascii=False)
         body = MultipartBody(file_path, mime_type, fields)
         try:
             status, payload = self.request(
@@ -605,6 +607,7 @@ def main(argv=None):
             "characterCategory": entry.get("characterCategory") or args.character_category,
             "parentAssetIds": args.parent_asset_ids,
             **({"characterCandidates": entry["characterCandidates"]} if "characterCandidates" in entry else {}),
+            **({"socialMetrics": entry["socialMetrics"]} if entry.get("socialMetrics") else {}),
         }
         try:
             asset = client.upload(file_path, metadata)

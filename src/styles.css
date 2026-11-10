@@ -2197,6 +2197,34 @@ button {
   font-size: 12px;
   line-height: 1.65;
 }
+.social-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 11px;
+}
+.social-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: #f6f7f4;
+  border-radius: 8px;
+}
+.social-metric-label {
+  color: #989f9c;
+  font-size: 10px;
+}
+.social-metric-value {
+  color: #3d4341;
+  font-size: 13px;
+  font-weight: 600;
+}
+.social-metrics-captured {
+  margin-top: 9px;
+  color: #989f9c;
+  font-size: 10px;
+}
 .detail-info-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -50,7 +50,7 @@ description: Download Instagram Reel/post, TikTok video and WeChat Channels (微
      --results "$HOME/Downloads/AIGC-Inspiration/example-batch-results.json"
    ```
 
-   上传复用同仓库 `aigc-asset-upload/scripts/upload_assets.py` 的 Client、登录会话和 SHA-256 去重接口；可用 `AIGC_UPLOAD_SCRIPT` 覆盖脚本位置。保存用户原链接到 `sourceUrl`、平台名到 `source`。服务端已存在相同文件时返回已有素材 ID，不再上传。每项用详情接口回读；新上传的标题、标签、来源与角色字段须与清单一致。已有条目报告服务端实际名称，不自动覆盖元数据；需要纠正时走整理技能。成功回读后只删除 `.identify` 内本流程生成的五张预览图，保留原件、交付副本和状态。未登录时停在本地下载成果，使用现有上传技能恢复会话后重试，不索要 Cookie 内容。
+   上传复用同仓库 `aigc-asset-upload/scripts/upload_assets.py` 的 Client、登录会话和 SHA-256 去重接口；可用 `AIGC_UPLOAD_SCRIPT` 覆盖脚本位置。保存用户原链接到 `sourceUrl`、平台名到 `source`。服务端已存在相同文件时返回已有素材 ID，不再上传。每项用详情接口回读；新上传的标题、标签、来源与角色字段须与清单一致。社交计数 `socialMetrics` 一并上传并回读比对；服务端还没上线该字段时只告警并保留本地快照，不阻断上传。已有条目报告服务端实际名称，不自动覆盖元数据；需要纠正时走整理技能。成功回读后只删除 `.identify` 内本流程生成的五张预览图，保留原件、交付副本和状态。未登录时停在本地下载成果，使用现有上传技能恢复会话后重试，不索要 Cookie 内容。
 
 4. 汇报每条链接的实际分辨率、视频编码、是否含音轨、是否生成转码副本、上传名称和素材 ID。分别说明下载原件与交付副本的大小，不能按 MB 大小判断清晰度，也不能将 FFmpeg 解码通过说成已在 QuickTime 实测。`existing` 是命中已有素材，`failed` 是失败，不能混称新增成功。某条失败不影响其它下载成功项；清单的 `errors` 保留失败原因。上传结果按项持续写入 `--results`。
 
@@ -118,6 +118,28 @@ python3 /path/to/skills/video-inspiration-import/scripts/import_video.py refresh
 ```
 
 refresh 按已保存素材 ID 从当前账号读取，只更新本地元数据，不改媒体字节、路径、哈希或下载来源记录；不会写回服务端。失败逐项报告。prepare 会在需要时重新生成已清理的预览。
+
+## 平台社交计数
+
+下载时顺手采集来源平台的互动数据（点赞/评论/转发/分享/收藏/播放），写进 `state.json`、清单的 `socialMetrics`，上传时随素材入库，供后续剪辑挑素材用。
+
+- **TikTok**：yt-dlp 解析时已经带回点赞、评论、分享、收藏、播放五项，直接取用，不额外发请求。TikTok 不区分转发与分享，`repost` 记 null。
+- **Instagram**：必须单独走移动端 REST 接口，且要两套 app-id 合并才有完整六项（`567310203415052` 给收藏/分享/播放，`936619743392459` 给转发）；Web 端 GraphQL 不返回收藏数。因此 Instagram 必须带 `--cookies-from-browser` 和能出网的 `--proxy`，否则计数抓不到。
+- 登录态只导出一次并按批次复用，导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），不要打印 Cookie 内容。
+- 抓不到不阻断下载：原因写进 `state.socialMetricsError`，视频照常进清单。
+- 计数是**抓取时刻的快照**，会随时间变化；值为 null 表示平台没给这个指标，不等于 0，不要当成 0 参与比较。
+- `--no-social-metrics` 可关闭本次采集。
+
+计数会变，剪辑决策前想看最新数据就重抓，并回写服务端：
+
+```bash
+python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics \
+  --manifest "/absolute/path/batch.json" \
+  --results "/absolute/path/batch-metrics.json" \
+  --proxy http://127.0.0.1:7890 --cookies-from-browser "chrome:/path/to/profile"
+```
+
+metrics 按清单逐条重抓，更新 state 与清单，并 `PATCH` 已上传素材的 `socialMetrics`；未上传的只更新本地。服务端尚未上线该字段时报错，不会静默丢弃。
 
 ## ClipDock 和重试
 
