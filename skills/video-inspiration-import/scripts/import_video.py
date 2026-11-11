@@ -414,6 +414,7 @@ def download_ytdlp(url, directory, args):
         "engine": "yt-dlp", "remoteId": str(info.get("id", "")),
         "originalTitle": str(info.get("title", ""))[:1000],
         "creator": str(info.get("uploader", ""))[:200],
+        "creatorId": str(info.get("uploader_id", ""))[:200],
         "formatId": info.get("format_id"), "expectedDuration": info.get("duration"),
         "expectedAudio": info.get("acodec") not in (None, "none"),
         "qualityPolicy": "highest available resolution, then fps and bitrate",
@@ -734,6 +735,7 @@ def prepare_one(raw, args):
         return {
             **state, "stateFile": str(state_file), "folder": "灵感收集",
             "name": state.get("asset", {}).get("name", ""), "tags": [],
+            "account": derive_account(state.get("creator"), state.get("creatorId"), state.get("originalTitle")),
             "warning": "" if state["media"]["audioCodecs"] else "No audio track; verify the original is silent",
         }
 
@@ -787,6 +789,46 @@ def load_uploader():
     raise RuntimeError("Install aigc-asset-upload or set AIGC_UPLOAD_SCRIPT")
 
 
+DECORATION_PATTERN = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F\u200D]+"
+)
+ACCOUNT_PATTERN = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
+
+
+def derive_account(creator="", creator_id="", original_title=""):
+    """从发布者信息里取出用于标题前缀的账号令牌。
+
+    平台给的显示名带 emoji、竖线或是拉开字距的 "S A N D R A"，原帖标题里则常见
+    "Video by <handle>"。这里只保留一个稳定的短令牌：去掉装饰符号、合并被拆开的
+    拉丁字母、取第一个词并转小写；显示名取不到时退回账号 ID 的第一段。
+    """
+    text = DECORATION_PATTERN.sub(" ", str(creator or ""))
+    text = re.sub(r"[｜|·]", " ", text)
+    words = text.split()
+    if len(words) > 1 and all(len(word) == 1 and word.isalpha() for word in words):
+        words = ["".join(words)]
+    token = words[0] if words else ""
+    if not token:
+        handle = str(creator_id or "").strip()
+        if not handle:
+            match = re.search(r"Video by ([A-Za-z0-9._-]+)", str(original_title or ""))
+            handle = match.group(1) if match else ""
+        token = handle.split("_")[0].split(".")[0]
+    token = token.strip().lower()
+    return token if ACCOUNT_PATTERN.fullmatch(token) else ""
+
+
+def apply_account_prefix(name, account):
+    """清单里写了 account 就给标题加账号前缀；已经带前缀的不重复添加。"""
+    token = str(account or "").strip()
+    name = str(name or "").strip()
+    if not token or not name:
+        return name
+    if name == token or name.startswith(token + "-"):
+        return name
+    return f"{token}-{name}"
+
+
 def validate_item(item):
     state_file = Path(item["stateFile"]).expanduser().resolve()
     state = read_json(state_file)
@@ -800,8 +842,10 @@ def validate_item(item):
     verification = state.get("verification", {})
     if verification.get("sha256") != state["sha256"] or not verification.get("passed"):
         raise ValueError("Prepare this video again to complete media and audio verification before upload")
-    name = item.get("name", "").strip()
+    name = apply_account_prefix(item.get("name", "").strip(), item.get("account"))
     tags = item.get("tags", [])
+    if len(name) > 32:
+        raise ValueError(f"标题超过 32 字（{len(name)} 字）：加上账号前缀后要压缩换装两端描述")
     load_uploader().validate_metadata({"name": name, "tags": tags})
     if item.get("folder", "灵感收集") != "灵感收集":
         raise ValueError("This workflow imports into 灵感收集; use aigc-asset-upload for other libraries")

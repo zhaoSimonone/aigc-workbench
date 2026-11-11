@@ -416,5 +416,92 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(selected.strip(), "high+audio")
 
 
+class AccountPrefixTests(unittest.TestCase):
+    """账号名前缀：从平台显示名清洗令牌，命名时统一加在标题最前面。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture_dir = tempfile.TemporaryDirectory()
+        cls.video = Path(cls.fixture_dir.name) / "fixture.mp4"
+        workflow.run([
+            workflow.tool("ffmpeg"), "-v", "error", "-f", "lavfi", "-i",
+            "color=c=red:size=180x320:rate=24", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=44100", "-t", "1", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", str(cls.video),
+        ])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fixture_dir.cleanup()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.args = argparse.Namespace(
+            root=self.root, engine="yt-dlp", urls=[URL], report=self.root / "report.json",
+        )
+
+    def fake_download(self, url, directory, args, **extra):
+        path = directory / "media.mp4"
+        shutil.copyfile(self.video, path)
+        metadata = {
+            "engine": "yt-dlp", "expectedDuration": 1, "expectedAudio": True, "remoteId": "123456",
+        }
+        metadata.update(extra)
+        return path, metadata
+
+    def test_display_names_are_cleaned_into_account_tokens(self):
+        cases = {
+            "Maki 💗": "maki",
+            "S A N D R A": "sandra",
+            "Shani Huang": "shani",
+            "Luna": "luna",
+            "小白 BAI｜ Elevated Living": "小白",
+        }
+        for creator, expected in cases.items():
+            self.assertEqual(workflow.derive_account(creator), expected, creator)
+
+    def test_account_id_and_title_are_used_when_the_display_name_is_missing(self):
+        self.assertEqual(workflow.derive_account("", "maki_hayakane"), "maki")
+        self.assertEqual(workflow.derive_account("", "luna.macht.music"), "luna")
+        self.assertEqual(workflow.derive_account("", "", "Video by shani_028_"), "shani")
+        self.assertEqual(workflow.derive_account("💗💗"), "")
+
+    def test_prefix_is_added_once(self):
+        self.assertEqual(
+            workflow.apply_account_prefix("灰宫学姐-灰宫美樱-换装", "maki"),
+            "maki-灰宫学姐-灰宫美樱-换装",
+        )
+        self.assertEqual(
+            workflow.apply_account_prefix("maki-灰宫学姐-灰宫美樱-换装", "maki"),
+            "maki-灰宫学姐-灰宫美樱-换装",
+        )
+        self.assertEqual(workflow.apply_account_prefix("灰宫学姐-换装", ""), "灰宫学姐-换装")
+
+    def test_upload_names_the_asset_with_the_account_prefix(self):
+        def download(url, directory, args):
+            return self.fake_download(url, directory, args, creator="Maki 💗", creatorId="maki_hayakane")
+
+        with patch.object(workflow, "download_ytdlp", side_effect=download):
+            item = workflow.prepare_one(URL, self.args)
+        self.assertEqual(item["account"], "maki")
+        item.update(name="灰宫学姐-灰宫美樱-换装", tags=["灰宫学姐", "灰宫美樱", "换装"])
+        client = FakeClient()
+        result = workflow.upload_one(item, client)
+        self.assertEqual(result["asset"]["name"], "maki-灰宫学姐-灰宫美樱-换装")
+
+    def test_name_longer_than_32_characters_with_prefix_is_rejected(self):
+        def download(url, directory, args):
+            return self.fake_download(url, directory, args, creator="Maki 💗")
+
+        with patch.object(workflow, "download_ytdlp", side_effect=download):
+            item = workflow.prepare_one(URL, self.args)
+        item.update(name="灰宫学姐可怕又可爱-灰宫美樱-贴图版-换装-红发换银白猫耳黑裙",
+                    tags=["灰宫学姐", "灰宫美樱", "换装"])
+        with self.assertRaisesRegex(ValueError, "32"):
+            workflow.upload_one(item, FakeClient())
+
+
 if __name__ == "__main__":
     unittest.main()
