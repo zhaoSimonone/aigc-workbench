@@ -1,10 +1,12 @@
 import argparse
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 
@@ -197,6 +199,27 @@ class InstagramCountTests(unittest.TestCase):
         with patch.object(metrics_module, "_http_get_json", side_effect=OSError("network down")):
             with self.assertRaises(RuntimeError):
                 metrics_module.collect_instagram("Dfa1yPBq7jZ", {"sessionid": "s"})
+
+    def test_an_account_challenge_is_raised_instead_of_being_swallowed(self):
+        """challenge_required 会被 HTTPError 吞掉，必须单独识别并抛出去。"""
+
+        def fake_get(url, headers, proxy=None, timeout=40):
+            raise urllib.error.HTTPError(
+                url, 400, "Bad Request", {},
+                io.BytesIO(b'{"message":"challenge_required","challenge":{"lock":true}}'))
+
+        with patch.object(metrics_module, "_http_get_json", side_effect=fake_get):
+            with self.assertRaises(metrics_module.AccountChallengeError):
+                metrics_module.collect_instagram("Dfa1yPBq7jZ", {"sessionid": "s"})
+
+    def test_an_ordinary_http_error_is_still_treated_as_a_missing_source(self):
+        def fake_get(url, headers, proxy=None, timeout=40):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"{}"))
+
+        with patch.object(metrics_module, "_http_get_json", side_effect=fake_get):
+            with self.assertRaises(RuntimeError) as caught:
+                metrics_module.collect_instagram("Dfa1yPBq7jZ", {"sessionid": "s"})
+        self.assertNotIsInstance(caught.exception, metrics_module.AccountChallengeError)
 
 
 class SnapshotTests(unittest.TestCase):
@@ -397,6 +420,49 @@ class WorkflowIntegrationTests(unittest.TestCase):
         outcome = workflow.read_json(results_file)["results"][0]
         self.assertEqual(outcome["status"], "updated")
         self.assertEqual(outcome["socialMetrics"]["like"], 700)
+
+    def test_an_account_challenge_stops_the_whole_batch(self):
+        """账号被要求验证时整批停下，不能继续请求后面的条目。"""
+        item = self.prepare_instagram_item()
+        state = workflow.read_json(item["stateFile"])
+        state["asset"] = {"id": "asset-1"}
+        workflow.write_json(item["stateFile"], state)
+        second_state_file = self.root / "second-state.json"
+        second_state = dict(state)
+        second_state["videoId"] = "SecondCode123"
+        workflow.write_json(second_state_file, second_state)
+        second = {"stateFile": str(second_state_file), "videoId": "SecondCode123",
+                  "sourceUrl": "https://www.instagram.com/reel/SecondCode123/"}
+        manifest = self.root / "manifest.json"
+        workflow.write_json(manifest, {"items": [item, second], "errors": []})
+        results_file = self.root / "metrics-results.json"
+        called = []
+
+        class ChallengedCollector:
+            def __init__(self, args):
+                pass
+
+            def instagram(self, shortcode):
+                called.append(shortcode)
+                # 用 workflow 里的那个类：测试文件单独加载了一份 social_metrics，
+                # 两份模块的异常类不是同一个类型。
+                raise workflow.social_metrics.AccountChallengeError(
+                    "Instagram 要求账号完成验证（challenge_required）")
+
+        uploader = FakeUploader()
+        args = argparse.Namespace(manifest=manifest, results=results_file,
+                                  api="https://shelf.example.test", cookie_file="",
+                                  proxy="", cookies_from_browser="", timeout=60, metrics_timeout=10)
+        with patch.object(workflow, "load_uploader", return_value=uploader), \
+                patch.object(workflow, "social_collector", return_value=ChallengedCollector(args)):
+            code = workflow.metrics(args)
+        self.assertNotEqual(code, 0)
+        # 第二条根本没被请求
+        self.assertEqual(len(called), 1)
+        results = workflow.read_json(results_file)["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "stopped")
+        self.assertIn("challenge_required", results[0]["error"])
 
     def test_metrics_keeps_the_local_snapshot_when_the_server_cannot_store_it(self):
         item = self.prepare_instagram_item()

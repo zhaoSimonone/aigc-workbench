@@ -21,6 +21,14 @@ from pathlib import Path
 
 METRIC_KEYS = ("like", "comment", "repost", "share", "save", "play")
 
+
+class AccountChallengeError(RuntimeError):
+    """Instagram 要求账号完成验证。
+
+    账号被要求 challenge 时，继续请求只会把风控打得更死，调用方必须整批停下来，
+    先在浏览器里把验证做完，而不是把它当成一条普通失败继续跑下一条。
+    """
+
 IG_APP_ID_FULL = "567310203415052"
 IG_APP_ID_REPOST = "936619743392459"
 IG_UA_MOBILE = ("Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; "
@@ -159,7 +167,19 @@ def collect_instagram(shortcode, cookies, proxy=None, timeout=40):
     ):
         try:
             sources.append(_instagram_info(pk, app_id, user_agent, cookies, referer, host, proxy, timeout))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError):
+        except urllib.error.HTTPError as error:
+            # HTTPError 是 URLError 的子类，必须先接住，否则会被下面的兜底吞掉。
+            body = ""
+            try:
+                body = error.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 - 读不出响应体不影响判断
+                body = ""
+            if "challenge_required" in body:
+                raise AccountChallengeError(
+                    "Instagram 要求账号完成验证（challenge_required）；"
+                    "请立刻停止采集，先在浏览器里处理验证再重试，不要继续请求") from error
+            continue
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             continue
     if not sources:
         raise RuntimeError(f"Instagram 计数接口没有返回数据：{shortcode}")

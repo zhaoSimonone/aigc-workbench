@@ -711,6 +711,10 @@ def prepare_one(raw, args):
                     "instagram", counts, social_metrics.SOURCE_INSTAGRAM)
                 state.pop("socialMetricsError", None)
                 log(f"{platform}/{video_id}: social metrics {state['socialMetrics']}")
+            except social_metrics.AccountChallengeError:
+                # 账号被要求验证：整批停下，别再下载并请求后面的条目。
+                # 下载成果在计数之前已经落盘，这里直接抛出去，不吞掉。
+                raise
             except Exception as error:
                 state["socialMetricsError"] = safe_error(error)
                 log(f"{platform}/{video_id}: social metrics unavailable: {safe_error(error)}")
@@ -782,6 +786,11 @@ def prepare(args):
                 continue
             seen.add(key)
             items.append(prepare_one(raw, args))
+        except social_metrics.AccountChallengeError as error:
+            # 账号被要求验证：立刻停掉整批，剩下的链接不再下载也不再请求。
+            errors.append({"sourceUrl": raw, "error": safe_error(error)})
+            write_json(args.report, {"items": items, "errors": errors})
+            break
         except Exception as error:
             errors.append({"sourceUrl": raw, "error": safe_error(error)})
         write_json(args.report, {"items": items, "errors": errors})
@@ -1058,12 +1067,20 @@ def metrics(args):
             results.append({"status": "updated" if not push_error else "local-only",
                             "platform": platform, "assetId": asset_id,
                             "socialMetrics": snapshot, "pushed": pushed, "error": push_error})
+        except social_metrics.AccountChallengeError as error:
+            # 账号被要求验证：立刻停掉整批。逐条 continue 只会把风控打得更死，
+            # 而且留下的失败结果会让人误以为是单条视频的问题。
+            results.append({"status": "stopped", "sourceUrl": item.get("sourceUrl"),
+                            "error": safe_error(error)})
+            write_json(args.manifest, report)
+            write_json(args.results, {"results": results})
+            break
         except Exception as error:
             results.append({"status": "failed", "sourceUrl": item.get("sourceUrl"), "error": safe_error(error)})
         write_json(args.manifest, report)
         write_json(args.results, {"results": results})
     print(json.dumps({"results": results, "resultsFile": str(args.results)}, ensure_ascii=False, indent=2))
-    return int(any(result["status"] == "failed" for result in results))
+    return int(any(result["status"] not in ("updated", "local-only") for result in results))
 
 
 def parse_args():
