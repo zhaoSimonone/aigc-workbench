@@ -122,7 +122,8 @@ class SocialCollector:
             self._cookie_text = social_metrics.export_browser_cookies(
                 getattr(self.args, "cookies_from_browser", ""), tool("yt-dlp"),
                 proxy=getattr(self.args, "proxy", "") or None,
-                timeout=getattr(self.args, "timeout", 300))
+                timeout=getattr(self.args, "timeout", 300),
+                expected_user_id=getattr(self.args, "expected_ig_user_id", "") or "")
         return social_metrics.parse_cookie_jar(self._cookie_text, domain)
 
     def instagram(self, shortcode):
@@ -749,7 +750,24 @@ def pace_pause(delay, jitter):
     return delay + random.uniform(0, jitter)
 
 
+def verify_browser_account(args):
+    """用浏览器登录态前先确认它是预期账号。
+
+    同一个浏览器 profile 里可能同时留着多个 Instagram 账号的登录态，换号登录
+    后旧 cookie 还在。不校验就会拿主账号去采集，等于用主账号的频率请求平台，
+    可能触发风控。这里在下载开始前拦一次；导出本身只读本地 cookie 库，不联网。
+    """
+    expected = str(getattr(args, "expected_ig_user_id", "") or "").strip()
+    source = str(getattr(args, "cookies_from_browser", "") or "").strip()
+    if not expected or not source:
+        return
+    social_metrics.export_browser_cookies(
+        source, tool("yt-dlp"), proxy=getattr(args, "proxy", "") or None,
+        timeout=getattr(args, "timeout", 300), expected_user_id=expected)
+
+
 def prepare(args):
+    verify_browser_account(args)
     items, errors, seen = [], [], set()
     for index, raw in enumerate(args.urls):
         if index:
@@ -1111,6 +1129,11 @@ def parse_args():
                         help="Seconds to wait between videos; slows the batch down to avoid rate limiting")
     counts.add_argument("--delay-jitter", type=float, default=0,
                         help="Extra random seconds added to each wait, up to this value")
+    for _parser in (download, counts):
+        _parser.add_argument(
+            "--expected-ig-user-id", default=os.environ.get("AIGC_IG_USER_ID", ""),
+            help="Expected Instagram ds_user_id for the browser session; collection stops when "
+                 "the browser is signed in to another account, so the main account is never used")
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
         if getattr(args, field, None) is not None:

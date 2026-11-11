@@ -63,6 +63,77 @@ class CookieTests(unittest.TestCase):
         self.assertEqual(jar["ds_user_id"], "00000000000")
 
 
+class ExportCookieGuardTests(unittest.TestCase):
+    """导出浏览器登录态时的账号护栏：同一 profile 可能留着多个账号，不能拿错。"""
+
+    JAR = "\n".join([
+        "# Netscape HTTP Cookie File",
+        ".instagram.com\tTRUE\t/\tTRUE\t13470133439500826\tsessionid\tfake-session-value",
+        "#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t13470133439500827\tds_user_id\t52498625541",
+        ".tiktok.com\tTRUE\t/\tTRUE\t13470133439500828\tsessionid\tother-site-session",
+    ])
+
+    def _export(self, jar_text, **kwargs):
+        def fake_run(command, **_ignored):
+            path = Path(command[command.index("--cookies") + 1])
+            path.write_text(jar_text, encoding="utf-8")
+            return None
+        with patch.object(metrics_module.subprocess, "run", fake_run):
+            return metrics_module.export_browser_cookies("chrome", "yt-dlp", **kwargs)
+
+    def test_matching_account_id_is_accepted(self):
+        text = self._export(self.JAR, expected_user_id="52498625541")
+        self.assertIn("sessionid", text)
+
+    def test_a_different_account_is_refused(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._export(self.JAR, expected_user_id="11111111111")
+        message = str(caught.exception)
+        self.assertIn("52498625541", message)
+        self.assertIn("11111111111", message)
+        # 护栏信息里不能带出 cookie 值
+        self.assertNotIn("fake-session-value", message)
+
+    def test_without_an_expected_id_the_export_still_works(self):
+        self.assertIn("sessionid", self._export(self.JAR))
+
+    def test_a_session_without_instagram_is_refused(self):
+        jar = "\n".join([
+            "# Netscape HTTP Cookie File",
+            ".tiktok.com\tTRUE\t/\tTRUE\t13470133439500828\tsessionid\tother-site-session",
+        ])
+        with self.assertRaises(RuntimeError):
+            self._export(jar, expected_user_id="52498625541")
+
+
+class BrowserAccountGuardTests(unittest.TestCase):
+    """prepare 开始前先校验浏览器登录态账号，避免整批请求打到主账号。"""
+
+    def test_guard_is_skipped_without_an_expected_id(self):
+        args = argparse.Namespace(cookies_from_browser="chrome", expected_ig_user_id="",
+                                  proxy="", timeout=60)
+        workflow.verify_browser_account(args)
+
+    def test_guard_is_skipped_without_a_browser_session(self):
+        args = argparse.Namespace(cookies_from_browser="", expected_ig_user_id="52498625541",
+                                  proxy="", timeout=60)
+        workflow.verify_browser_account(args)
+
+    def test_guard_checks_the_expected_account(self):
+        """护栏把期望账号交给导出层校验，账号不符时导出层直接报错。"""
+        captured = {}
+
+        def fake_export(*_args, **kwargs):
+            captured.update(kwargs)
+            return ""
+        args = argparse.Namespace(cookies_from_browser="chrome", expected_ig_user_id="52498625541",
+                                  proxy="", timeout=60)
+        with patch.object(workflow.social_metrics, "export_browser_cookies", fake_export):
+            workflow.verify_browser_account(args)
+        self.assertEqual(captured.get("expected_user_id"), "52498625541")
+        self.assertIn("chrome", captured.get("cookies_from_browser", "") or "chrome")
+
+
 class TiktokCountTests(unittest.TestCase):
     INFO = {
         "extractor": "TikTok", "id": "7671816463304461599",

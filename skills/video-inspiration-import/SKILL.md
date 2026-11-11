@@ -126,7 +126,7 @@ refresh 按已保存素材 ID 从当前账号读取，只更新本地元数据�
 下载时顺手采集来源平台的互动数据（点赞/评论/转发/分享/收藏/播放），写进 `state.json`、清单的 `socialMetrics`，上传时随素材入库，供后续剪辑挑素材用。
 
 - **TikTok**：yt-dlp 解析时已经带回点赞、评论、分享、收藏、播放五项，直接取用，不额外发请求。TikTok 不区分转发与分享，`repost` 记 null。
-- **Instagram**：必须单独走移动端 REST 接口，且要两套 app-id 合并才有完整六项（`567310203415052` 给收藏/分享/播放，`936619743392459` 给转发）；Web 端 GraphQL 不返回收藏数。因此 Instagram 必须带 `--cookies-from-browser` 和能出网的 `--proxy`，否则计数抓不到。
+- **Instagram**：必须单独走移动端 REST 接口，且要两套 app-id 合并才有完整六项（`567310203415052` 给收藏/分享/播放，`936619743392459` 给转发）；Web 端 GraphQL 不返回收藏数。因此 Instagram 必须带 `--cookies-from-browser` 和能出网的 `--proxy`，否则计数抓不到。`--cookies-from-browser` 用采集账号所在的浏览器 profile（见下节「Instagram 采集账号护栏」），不要指向主账号的浏览器。
 - 登录态只导出一次并按批次复用，导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），不要打印 Cookie 内容。
 - 抓不到不阻断下载：原因写进 `state.socialMetricsError`，视频照常进清单。
 - 计数是**抓取时刻的快照**，会随时间变化；值为 null 表示平台没给这个指标，不等于 0，不要当成 0 参与比较。
@@ -138,7 +138,7 @@ refresh 按已保存素材 ID 从当前账号读取，只更新本地元数据�
 python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics \
   --manifest "/absolute/path/batch.json" \
   --results "/absolute/path/batch-metrics.json" \
-  --proxy http://127.0.0.1:7890 --cookies-from-browser "chrome:/path/to/profile"
+  --proxy http://127.0.0.1:7890 --cookies-from-browser "chrome"
 ```
 
 metrics 按清单逐条重抓，更新 state 与清单，并 `PATCH` 已上传素材的 `socialMetrics`；未上传的只更新本地。服务端尚未上线该字段时报错，不会静默丢弃。
@@ -156,6 +156,16 @@ Instagram 对高频请求很敏感，连续抓取容易被判为爬虫、触发�
 | `--ytdlp-limit-rate 800K` | 限制下载带宽 |
 
 `metrics` 子命令同样支持 `--delay` / `--delay-jitter`，因为它用的是账号登录态。计数接口出现 429/403 时立即停止，不要重试轰炸；采集失败只记 `socialMetricsError`，不影响下载。
+
+## Instagram 采集账号护栏
+
+同一个浏览器 profile 里可能同时留着多个 Instagram 账号的登录态（换号登录后旧 cookie 还在），拿错就等于用主账号的频率去请求平台，可能触发风控。所以**Instagram 的登录态采集固定用一个专用采集账号，主账号不参与采集**：
+
+- 专用采集账号：`simonone.one`。它的账号标识写在私密环境文件 `AIGC_IG_USER_ID` 里，不进仓库。
+- 主账号 `itslumiaoi` 只在浏览器里手动登录，**不用于任何下载或计数请求**。
+- 护栏：`prepare` / `metrics` 在开始前会核对浏览器登录态的 `ds_user_id`，与期望账号不符直接报错退出，不发任何请求。期望值来自环境变量 `AIGC_IG_USER_ID`（也可用 `--expected-ig-user-id` 覆盖）。没设这个变量时不校验。
+- 核对只读本地 cookie 库，不联网，也不打印 Cookie 内容。
+- 浏览器里切回主账号后，采集会立刻报错而不是默默用主账号跑——看到报错就去浏览器切回 `simonone.one`。
 
 ## ClipDock 和重试
 

@@ -76,12 +76,17 @@ def parse_cookie_jar(text, domain_suffix=""):
     return jar
 
 
-def export_browser_cookies(cookies_from_browser, ytdlp, proxy=None, timeout=120):
+def export_browser_cookies(cookies_from_browser, ytdlp, proxy=None, timeout=120,
+                           expected_user_id=""):
     """用 yt-dlp 把浏览器登录态导出成 Netscape cookie 文本。
 
     指向一个必然失败的地址即可：yt-dlp 在退出时仍会把浏览器 cookie 落盘，
     因此这一步不需要任何外网请求，也不会把 cookie 内容打印出来。
     返回文本而不是字典，因为调用方要按域名取用。
+
+    expected_user_id 给定时会校验 Instagram 账号（ds_user_id）。浏览器里可能
+    同时存着多个 Instagram 账号的登录态，一旦在同一个 profile 里切了账号，
+    不校验就会拿主账号去采集，等于用主账号的频率去请求平台。
     """
     if not cookies_from_browser:
         raise ValueError("没有可用的浏览器登录态")
@@ -99,8 +104,16 @@ def export_browser_cookies(cookies_from_browser, ytdlp, proxy=None, timeout=120)
         if not path.is_file():
             raise RuntimeError("导出浏览器登录态失败：yt-dlp 没有写出 cookie 文件")
         text = path.read_text(encoding="utf-8", errors="replace")
-    if "sessionid" not in parse_cookie_jar(text, "instagram.com"):
+    jar = parse_cookie_jar(text, "instagram.com")
+    if "sessionid" not in jar:
         raise RuntimeError("浏览器登录态里没有 Instagram 会话 Cookie，请先在该浏览器登录 Instagram")
+    expected = str(expected_user_id or "").strip()
+    if expected:
+        actual = str(jar.get("ds_user_id", "") or "")
+        if actual != expected:
+            raise RuntimeError(
+                f"浏览器登录态不是预期账号（ds_user_id={actual or '缺失'}，期望 {expected}）；"
+                "请先在浏览器里切换到正确的 Instagram 账号再采集")
     return text
 
 
