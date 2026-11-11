@@ -468,6 +468,23 @@ class AccountPrefixTests(unittest.TestCase):
         self.assertEqual(workflow.derive_account("", "", "Video by shani_028_"), "shani")
         self.assertEqual(workflow.derive_account("💗💗"), "")
 
+    def test_chinese_self_describing_names_keep_only_the_main_name(self):
+        """“悠哈酱就是悠悠大王”这类中文昵称只取主名，别挤满 32 字预算。"""
+        cases = {
+            "悠哈酱就是悠悠大王": "悠哈酱",
+            "阿吉就是小鱼": "阿吉",
+            "悠哈酱，就是我": "悠哈酱",
+        }
+        for creator, expected in cases.items():
+            self.assertEqual(workflow.derive_account(creator), expected, creator)
+
+    def test_plain_chinese_names_are_not_split(self):
+        """没有主名连接词的普通昵称保持原样，不被切碎。"""
+        for creator in ("悠哈酱", "小羊", "就是", "我爱跳舞", "悠悠大王真名悠哈酱"):
+            self.assertEqual(workflow.derive_account(creator), creator, creator)
+        # 连接词前面只剩一个字时也不切，避免把主名削没。
+        self.assertEqual(workflow.derive_account("我就是这样"), "我就是这样")
+
     def test_prefix_is_added_once(self):
         self.assertEqual(
             workflow.apply_account_prefix("灰宫学姐-灰宫美樱-换装", "maki"),

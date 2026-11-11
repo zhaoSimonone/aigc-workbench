@@ -793,6 +793,30 @@ DECORATION_PATTERN = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F\u200D]+"
 )
 ACCOUNT_PATTERN = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
+# 中文昵称常写成“主名就是别名”的自述句式，整串塞进标题会挤掉 32 字预算。
+# 只认方向一致的主名连接词：“主名就是别名”切前半段；
+# “昵称真名XXX”这类主名在后、方向相反的写法不做猜测。
+CHINESE_NAME_SEPARATORS = ("就是", "正是")
+# 切分后主名两侧可能粘着标点，去掉才不会让令牌过不了 ACCOUNT_PATTERN。
+NAME_TRIM_CHARS = " \t，。！？、·.,!?:：;；~～-—_"
+
+
+def chinese_display_name(token):
+    """把“悠哈酱就是悠悠大王”这样的中文昵称收成主名“悠哈酱”。
+
+    视频号、小红书这类平台的中文昵称常用“主名就是别名”的句式，账号前缀只取
+    主名，作品名和角色名才有预算写清楚。切不出合法主名就原样返回。
+    """
+    for separator in CHINESE_NAME_SEPARATORS:
+        head, found, _ = token.partition(separator)
+        if not found:
+            continue
+        head = head.strip(NAME_TRIM_CHARS)
+        if (len(head) >= 2
+                and any("\u4e00" <= ch <= "\u9fff" for ch in head)
+                and ACCOUNT_PATTERN.fullmatch(head)):
+            return head
+    return token
 
 
 def derive_account(creator="", creator_id="", original_title=""):
@@ -800,7 +824,8 @@ def derive_account(creator="", creator_id="", original_title=""):
 
     平台给的显示名带 emoji、竖线或是拉开字距的 "S A N D R A"，原帖标题里则常见
     "Video by <handle>"。这里只保留一个稳定的短令牌：去掉装饰符号、合并被拆开的
-    拉丁字母、取第一个词并转小写；显示名取不到时退回账号 ID 的第一段。
+    拉丁字母、取第一个词并转小写，中文自述昵称再收成主名；显示名取不到时退回
+    账号 ID 的第一段。
     """
     text = DECORATION_PATTERN.sub(" ", str(creator or ""))
     text = re.sub(r"[｜|·]", " ", text)
@@ -808,6 +833,8 @@ def derive_account(creator="", creator_id="", original_title=""):
     if len(words) > 1 and all(len(word) == 1 and word.isalpha() for word in words):
         words = ["".join(words)]
     token = words[0] if words else ""
+    if token:
+        token = chinese_display_name(token)
     if not token:
         handle = str(creator_id or "").strip()
         if not handle:
