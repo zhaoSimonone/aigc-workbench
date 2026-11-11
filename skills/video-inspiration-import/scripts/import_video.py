@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
@@ -361,7 +362,8 @@ def preview(path, media, directory):
     return str(sheet)
 
 
-def download_ytdlp(url, directory, args):
+def build_ytdlp_command(url, directory, args):
+    """拼出 yt-dlp 命令。限速选项只在显式传入时生效，默认行为不变。"""
     command = [
         tool("yt-dlp"), "--ignore-config", "--no-playlist", "--no-progress",
         "--no-warnings", "--socket-timeout", "25", "--retries", "1",
@@ -376,7 +378,19 @@ def download_ytdlp(url, directory, args):
         command += ["--proxy", args.proxy]
     if args.cookies_from_browser:
         command += ["--cookies-from-browser", args.cookies_from_browser]
+    # 限速选项：不传就不改变原有行为；用于把请求摊开，降低被判定为爬虫的概率。
+    if getattr(args, "ytdlp_sleep_requests", 0):
+        command += ["--sleep-requests", str(args.ytdlp_sleep_requests)]
+    if getattr(args, "ytdlp_sleep_interval", 0):
+        command += ["--sleep-interval", str(args.ytdlp_sleep_interval)]
+    if getattr(args, "ytdlp_limit_rate", ""):
+        command += ["--limit-rate", str(args.ytdlp_limit_rate)]
     command += ["--", url]
+    return command
+
+
+def download_ytdlp(url, directory, args):
+    command = build_ytdlp_command(url, directory, args)
     output = run(command, args.timeout)
     entries = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
     if len(entries) != 1 or entries[0].get("_type") == "playlist":
@@ -724,9 +738,23 @@ def prepare_one(raw, args):
         }
 
 
+def pace_pause(delay, jitter):
+    """算出这一轮要停多久。抖动让间隔看起来像人在操作，而不是定时器。"""
+    delay = float(delay or 0)
+    jitter = float(jitter or 0)
+    if delay <= 0:
+        return 0
+    return delay + random.uniform(0, jitter)
+
+
 def prepare(args):
     items, errors, seen = [], [], set()
-    for raw in args.urls:
+    for index, raw in enumerate(args.urls):
+        if index:
+            pause = pace_pause(getattr(args, "delay", 0), getattr(args, "delay_jitter", 0))
+            if pause:
+                log(f"pacing: waiting {pause:.0f}s before the next download")
+                time.sleep(pause)
         try:
             platform, video_id, _ = identify(raw)
             key = (platform, video_id)
@@ -895,7 +923,12 @@ def metrics(args):
     client.require("GET", "/api/auth/me")
     collector = social_collector(args)
     results = []
-    for item in items:
+    for index, item in enumerate(items):
+        if index:
+            pause = pace_pause(getattr(args, "delay", 0), getattr(args, "delay_jitter", 0))
+            if pause:
+                log(f"pacing: waiting {pause:.0f}s before the next count")
+                time.sleep(pause)
         try:
             state_file = Path(item["stateFile"]).expanduser().resolve()
             with locked(state_file.parent):
@@ -967,6 +1000,16 @@ def parse_args():
     download.add_argument("--no-social-metrics", action="store_true",
                           help="Do not collect platform social counts (likes, comments, shares, saves)")
     download.add_argument("--metrics-timeout", type=int, default=40)
+    download.add_argument("--delay", type=float, default=0,
+                          help="Seconds to wait between videos; slows the batch down to avoid rate limiting")
+    download.add_argument("--delay-jitter", type=float, default=0,
+                          help="Extra random seconds added to each wait, up to this value")
+    download.add_argument("--ytdlp-sleep-requests", type=int, default=0,
+                          help="yt-dlp sleeps between the downloads of consecutive videos")
+    download.add_argument("--ytdlp-sleep-interval", type=float, default=0,
+                          help="Maximum seconds yt-dlp waits between requests of the same video")
+    download.add_argument("--ytdlp-limit-rate", default="",
+                          help="Bandwidth cap for yt-dlp, for example 800K")
     download.add_argument("--timeout", type=int, default=300)
     download.add_argument("--capture-timeout", type=int, default=150)
     send = sub.add_parser("upload", help="Upload a reviewed manifest, checking server hashes first")
@@ -993,6 +1036,10 @@ def parse_args():
     counts.add_argument("--cookies-from-browser", default="")
     counts.add_argument("--timeout", type=int, default=300)
     counts.add_argument("--metrics-timeout", type=int, default=40)
+    counts.add_argument("--delay", type=float, default=0,
+                        help="Seconds to wait between videos; slows the batch down to avoid rate limiting")
+    counts.add_argument("--delay-jitter", type=float, default=0,
+                        help="Extra random seconds added to each wait, up to this value")
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
         if getattr(args, field, None) is not None:

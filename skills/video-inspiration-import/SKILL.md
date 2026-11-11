@@ -141,6 +141,20 @@ python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics
 
 metrics 按清单逐条重抓，更新 state 与清单，并 `PATCH` 已上传素材的 `socialMetrics`；未上传的只更新本地。服务端尚未上线该字段时报错，不会静默丢弃。
 
+## 慢速下载与账号保护
+
+Instagram 对高频请求很敏感，连续抓取容易被判为爬虫、触发限流甚至影响账号。批量采集时**优先不带账号 Cookie 匿名下载**（`--cookies-from-browser` 不传），账号零接触；匿名拿不到时才考虑登录态，并放慢节奏：
+
+| 参数 | 作用 |
+| --- | --- |
+| `--delay N` | 每条视频之间等待 N 秒 |
+| `--delay-jitter N` | 在 N 秒基础上再加 0–N 秒随机抖动，间隔不规律更像人工操作 |
+| `--ytdlp-sleep-requests N` | yt-dlp 在连续下载之间插入休眠 |
+| `--ytdlp-sleep-interval N` | 同一条视频内部两次请求之间最多等待 N 秒 |
+| `--ytdlp-limit-rate 800K` | 限制下载带宽 |
+
+`metrics` 子命令同样支持 `--delay` / `--delay-jitter`，因为它用的是账号登录态。计数接口出现 429/403 时立即停止，不要重试轰炸；采集失败只记 `socialMetricsError`，不影响下载。
+
 ## ClipDock 和重试
 
 - ClipDock 提供本地 API，默认 `http://127.0.0.1:3457`。若需要回退且未启动，打开本机 ClipDock 客户端，或使用实际 video-downloads 项目目录运行其 `server.js`（Node 22+）。不要假设另一台电脑有相同仓库绝对路径。不要停止用户已经运行的实例。已有服务占用默认端口但不是 ClipDock 时，选择空闲端口，通过 `PORT` 启动并传 `--clipdock`。
