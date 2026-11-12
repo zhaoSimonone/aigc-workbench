@@ -57,6 +57,14 @@ DEFAULT_API = "https://api.hikerapi.com"
 DEFAULT_KEY_ENV = "HIKERAPI_KEY"
 SOURCE_HOSTED = "hosted-api"
 
+# 端点按官方 OpenAPI（https://api.hikerapi.com/openapi.json）核对过：
+# - /v2/user/by/username 取账号资料，返回 User 对象（含 pk）
+# - /v2/user/clips 取 reels，**只接受 user_id + page_id，不接受 username**
+# 返回体是 {"response": {"items": [...], "paging_info": {...}}, "next_page_id": "..."}，
+# 所以解析要往 response.items 里钻一层。
+PATH_PROFILE = "/v2/user/by/username"
+PATH_CLIPS = "/v2/user/clips"
+
 # 分页响应的外层可能是 {"response": {...}}、{"items": [...]} 或直接一个数组。
 _REELS_CONTAINER_KEYS = ("items", "response_items", "clips", "reels", "media", "data")
 
@@ -71,6 +79,14 @@ class HostedAuthError(HostedError):
 
 class HostedRateLimitError(HostedError):
     """被对方限流。不要自动重试，交给调用方决定。"""
+
+
+class HostedInsufficientFundsError(HostedError):
+    """账户余额为 0（HTTP 402）。key 本身可能是对的，只是没有可用额度。
+
+    HikerAPI 的免费额度不会自动到账：需要在官网 /billing 页按横幅提示
+    确认 Telegram ID 才解锁。遇到 402 不要换 key 重试，先去确认额度状态。
+    """
 
 
 class HostedRequestError(HostedError):
@@ -151,16 +167,46 @@ def shortcode_of(item):
 
 
 def media_items(payload):
-    """从各种外层结构里取出媒体数组。"""
+    """从各种外层结构里取出媒体数组。
+
+    官方 `/v2/user/clips` 的实际形状是
+    `{"response": {"items": [...], "paging_info": {...}}, "next_page_id": "..."}`，
+    所以先往 `response` 钻一层，再按容器键找；直接放在顶层的写法也一并兼容。
+    """
     if isinstance(payload, list):
         return [entry for entry in payload if isinstance(entry, dict)]
     if not isinstance(payload, dict):
         return []
-    for key in _REELS_CONTAINER_KEYS:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return [entry for entry in value if isinstance(entry, dict)]
+
+    candidates = [payload]
+    nested = payload.get("response")
+    if isinstance(nested, dict):
+        candidates.insert(0, nested)
+
+    for container in candidates:
+        for key in _REELS_CONTAINER_KEYS:
+            value = container.get(key)
+            if isinstance(value, list):
+                return [entry for entry in value if isinstance(entry, dict)]
     return []
+
+
+def next_page_id(payload):
+    """取翻页游标：`next_page_id`，或 response 里的 `paging_info.max_id`。"""
+    if not isinstance(payload, dict):
+        return None
+    cursor = payload.get("next_page_id")
+    if isinstance(cursor, str) and cursor:
+        return cursor
+    nested = payload.get("response")
+    if isinstance(nested, dict):
+        paging = nested.get("paging_info")
+        if isinstance(paging, dict):
+            for key in ("max_id", "next_max_id"):
+                value = paging.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
 
 
 def build_snapshot(counts, source=SOURCE_HOSTED, captured_at=None):
@@ -224,6 +270,12 @@ class HostedClient:
             raise HostedAuthError(
                 f"托管 API 拒绝授权（HTTP {status}）：key 无效、额度耗尽，或授权方式不对。"
                 f"服务端原话：{text[:200]}。不要重试，先确认账户余额与 key 的传递方式。")
+        if status == 402:
+            raise HostedInsufficientFundsError(
+                f"托管 API 返回 402：账户没有可用额度（key 认证本身可能没问题）。"
+                f"服务端原话：{text[:200]}。"
+                "先去 https://hikerapi.com/billing 确认额度；免费额度通常要按"
+                "页面横幅提示确认 Telegram ID 才会解锁。不要换 key 反复重试。")
         if status == 429:
             raise HostedRateLimitError(
                 "托管 API 返回 429 限流。不要自动重试——连续重试会把限流打死；"
@@ -238,7 +290,7 @@ class HostedClient:
 
     def profile(self, username):
         """账号资料。第一步用它确认能否读到该账号（含年龄门槛账号）。"""
-        return self._get("/v1/user/by/username", {"username": username})
+        return self._get(PATH_PROFILE, {"username": username})
 
     def user_id(self, username):
         payload = self.profile(username)
@@ -254,16 +306,19 @@ class HostedClient:
         raise HostedRequestError(f"账号资料里没有 id 字段：{str(payload)[:200]}")
 
     def reels(self, username=None, user_id=None, page_id=None):
-        """账号的 reels/clips 列表。带 view_count 等计数。"""
-        if username and not user_id:
-            params = {"username": username}
-        elif user_id:
-            params = {"user_id": str(user_id)}
-        else:
+        """账号的 reels/clips 列表。带 play_count / like_count / video_url。
+
+        该端点只认 `user_id`（官方 OpenAPI 里没有 username 参数），
+        所以给 username 时先解析出 pk，多花一次请求。
+        """
+        if not user_id and username:
+            user_id = self.user_id(username)
+        if not user_id:
             raise ValueError("reels 需要 username 或 user_id")
+        params = {"user_id": str(user_id)}
         if page_id:
             params["page_id"] = str(page_id)
-        return self._get("/v1/user/clips", params)
+        return self._get(PATH_CLIPS, params)
 
 
 def summarize(payload):
@@ -313,6 +368,9 @@ def main(argv=None):
     except HostedAuthError as error:
         print(f"错误：{error}", file=sys.stderr)
         return 2
+    except HostedInsufficientFundsError as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 4
     except HostedRateLimitError as error:
         print(f"错误：{error}", file=sys.stderr)
         return 3

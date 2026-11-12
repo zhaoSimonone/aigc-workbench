@@ -109,9 +109,9 @@ class MediaItemsTests(unittest.TestCase):
         self.assertEqual(len(hm.media_items({"items": [{"code": "a"}, {"code": "b"}]})), 2)
 
     def test_response_wrapper(self):
-        # 部分托管 API 把数据包在 response 里；这里只保证不会崩，交给上游再适配。
-        payload = {"response": {"items": [{"code": "a"}]}}
-        self.assertEqual(hm.media_items(payload), [])
+        # 官方 /v2/user/clips 的真实形状：{"response": {"items": [...]}, "next_page_id": ...}
+        payload = {"response": {"items": [{"code": "a"}, {"code": "b"}]}, "next_page_id": "cur"}
+        self.assertEqual(len(hm.media_items(payload)), 2)
 
     def test_unknown_shape_is_empty(self):
         self.assertEqual(hm.media_items({"foo": 1}), [])
@@ -171,7 +171,7 @@ class ClientRequestTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("username=yunalovescosplay", calls[0]["url"])
         self.assertEqual(calls[0]["headers"]["x-access-key"], FAKE_KEY)
-        self.assertTrue(calls[0]["url"].startswith("https://api.hikerapi.com/v1/user/by/username"))
+        self.assertTrue(calls[0]["url"].startswith("https://api.hikerapi.com/v2/user/by/username"))
 
     def test_user_id_from_pk(self):
         client = hm.HostedClient(api_key=FAKE_KEY, transport=make_transport(200, {"pk": 16998768578}))
@@ -181,6 +181,23 @@ class ClientRequestTests(unittest.TestCase):
         client = hm.HostedClient(api_key=FAKE_KEY, transport=make_transport(200, {"username": "yuna"}))
         with self.assertRaises(hm.HostedRequestError):
             client.user_id("yuna")
+
+    def test_reels_with_username_resolves_pk_first(self):
+        calls = []
+        def transport(url, headers, timeout):
+            calls.append(url)
+            if "by/username" in url:
+                return 200, json.dumps({"pk": "16998768578"}).encode()
+            return 200, json.dumps({"response": {"items": []}}).encode()
+        client = hm.HostedClient(api_key=FAKE_KEY, transport=transport)
+        client.reels(username="yuna")
+        self.assertEqual(len(calls), 2, "clips 只认 user_id，应先解析 pk")
+        self.assertIn("user_id=16998768578", calls[1])
+
+    def test_next_page_id_top_level_and_nested(self):
+        self.assertEqual(hm.next_page_id({"next_page_id": "a"}), "a")
+        self.assertEqual(hm.next_page_id({"response": {"paging_info": {"max_id": "b"}}}), "b")
+        self.assertIsNone(hm.next_page_id({"response": {"items": []}}))
 
     def test_reels_requires_identifier(self):
         client = hm.HostedClient(api_key=FAKE_KEY, transport=make_transport(200, {}))
@@ -202,6 +219,14 @@ class ClientRequestTests(unittest.TestCase):
         with self.assertRaises(hm.HostedRateLimitError):
             client.reels(username="yuna")
         self.assertEqual(len(calls), 1, "429 不应自动重试，连续重试会把限流打死")
+
+    def test_402_is_insufficient_funds(self):
+        client = hm.HostedClient(api_key=FAKE_KEY,
+                                 transport=make_transport(402, {"error": "Top up your account"}))
+        with self.assertRaises(hm.HostedInsufficientFundsError) as ctx:
+            client.profile("yuna")
+        self.assertIn("402", str(ctx.exception))
+        self.assertIn("billing", str(ctx.exception))
 
     def test_500_is_request_error(self):
         client = hm.HostedClient(api_key=FAKE_KEY, transport=make_transport(500, {"e": 1}))
