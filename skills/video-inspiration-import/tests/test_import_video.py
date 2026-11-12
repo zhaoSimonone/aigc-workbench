@@ -243,7 +243,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow.digest(item["path"]), item["sha256"])
         self.assertEqual(workflow.read_json(item["stateFile"])["sha256"], item["sha256"])
 
-    def test_auto_tries_clipdock_session_before_browser_capture(self):
+    def test_auto_does_not_switch_accounts_or_capture_after_failure(self):
         self.args.engine = "auto"
         self.args.cookies_from_browser = ""
         self.args.no_clipdock_cookies = False
@@ -255,12 +255,24 @@ class WorkflowTests(unittest.TestCase):
                 raise RuntimeError("Login required")
             return self.fake_download(url, directory, args)
 
-        with patch.object(workflow, "CLIPDOCK_PROFILE", self.root), \
-                patch.object(workflow, "download_ytdlp", side_effect=downloader), \
-                patch.object(workflow, "download_clipdock", side_effect=AssertionError("unneeded capture")):
-            item = workflow.prepare_one(URL, self.args)
-        self.assertEqual(attempts, ["", f"chrome:{self.root}"])
-        self.assertEqual(item["engine"], "yt-dlp")
+        with patch.object(workflow, "download_ytdlp", side_effect=downloader), \
+                patch.object(workflow, "download_clipdock") as capture:
+            with self.assertRaisesRegex(RuntimeError, "Login required"):
+                workflow.prepare_one(URL, self.args)
+        self.assertEqual(attempts, [""])
+        capture.assert_not_called()
+
+    def test_instagram_wrong_shortcode_is_rejected_before_publication(self):
+        with patch.object(workflow, "download_ytdlp", side_effect=self.fake_download):
+            with self.assertRaisesRegex(RuntimeError, "video ID does not match"):
+                workflow.prepare_one("https://www.instagram.com/p/EXPECTED/", self.args)
+        self.assertFalse((self.root / "instagram/EXPECTED/state.json").exists())
+
+    def test_user_provided_metrics_are_preserved_without_collection(self):
+        item = self.prepare_item()
+        item["socialMetrics"] = {"source": "user-provided", "play": 8533, "like": 158}
+        result = workflow.upload_one(item, FakeClient())
+        self.assertEqual(result["asset"]["socialMetrics"], item["socialMetrics"])
 
     def test_invalid_media_never_enters_upload_plan(self):
         def bad_download(url, directory, args):
@@ -279,13 +291,16 @@ class WorkflowTests(unittest.TestCase):
                 workflow.prepare_one(URL, self.args)
 
     def test_batch_keeps_success_when_another_link_fails(self):
-        self.args.urls = ["https://invalid.test/", URL, URL + "?sender=duplicate"]
+        self.args.urls = [URL, "https://invalid.test/", URL + "?sender=duplicate"]
         with patch.object(workflow, "download_ytdlp", side_effect=self.fake_download), \
+                patch.dict(workflow.os.environ, {"AIGC_WORKBENCH_STATE_DIR": str(self.root / "config")}), \
+                patch.object(workflow.time, "sleep"), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(workflow.prepare(self.args), 1)
         report = workflow.read_json(self.args.report)
         self.assertEqual(len(report["items"]), 1)
         self.assertEqual(len(report["errors"]), 1)
+        self.assertEqual(report["notAttempted"], [self.args.urls[-1]])
 
     def test_upload_preserves_source_and_reconciles_lost_response(self):
         item = self.prepare_item()

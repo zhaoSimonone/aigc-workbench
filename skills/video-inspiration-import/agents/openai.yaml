@@ -1,4 +1,4 @@
 interface:
   display_name: "视频链接采集"
-  short_description: "下载 Instagram 和 TikTok 高清视频并命名上传到灵感库"
-  default_prompt: "使用 $video-inspiration-import 下载这些视频链接，查看画面后命名并上传到灵感收集。"
+  short_description: "串行下载高清视频，随机暂停30–60秒，识别角色后上传灵感库"
+  default_prompt: "使用 $video-inspiration-import 串行下载视频，每条间随机暂停30–60秒，不采集点赞评论等计数。复用用户授权的Chrome登录态，Instagram使用/p/详情链接；失败停止本批。查看画面并识别作品角色，命名后通过API上传到灵感收集，列出完成与未完成项。"

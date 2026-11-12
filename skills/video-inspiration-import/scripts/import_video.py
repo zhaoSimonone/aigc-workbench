@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -21,13 +22,11 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import browser_metrics
-import social_metrics
+import browser_session
 
 
 HOME = Path.home()
 DEFAULT_ROOT = HOME / "Downloads" / "AIGC-Inspiration"
-CLIPDOCK_PROFILE = HOME / "Library/Application Support/ClipDock/InstagramChromeProfile"
 FORMAT = "bv*+ba/b"
 SORT = "res,fps,br"
 MAX_BYTES = 2 * 1024**3
@@ -107,78 +106,6 @@ def run(command, timeout=300):
     return result.stdout
 
 
-class SocialCollector:
-    """按批次缓存浏览器登录态，逐条采集平台社交计数。
-
-    登录态只导出一次；导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），
-    真正联网的只有 Instagram 的计数接口。
-    """
-
-    def __init__(self, args):
-        self.args = args
-        self._cookie_text = None
-
-    def cookies(self, domain="instagram.com"):
-        if self._cookie_text is None:
-            self._cookie_text = social_metrics.export_browser_cookies(
-                getattr(self.args, "cookies_from_browser", ""), tool("yt-dlp"),
-                proxy=getattr(self.args, "proxy", "") or None,
-                timeout=getattr(self.args, "timeout", 300),
-                expected_user_id=getattr(self.args, "expected_ig_user_id", "") or "")
-        return social_metrics.parse_cookie_jar(self._cookie_text, domain)
-
-    def instagram(self, shortcode):
-        return social_metrics.collect_instagram(
-            shortcode, self.cookies("instagram.com"), proxy=getattr(self.args, "proxy", "") or None,
-            timeout=getattr(self.args, "metrics_timeout", 40))
-
-    def instagram_browser(self, shortcode):
-        """在真实 Chrome 页面里取计数：直连接口被风控时走这条通道。
-
-        页面用的就是浏览器自己的登录态，所以这里不再另外导出 cookie；
-        账号身份由页面里的 ds_user_id 校验，主账号不会被误用。
-        """
-        counts = browser_metrics.collect_instagram_in_browser(
-            [shortcode],
-            delay=getattr(self.args, "delay", 0),
-            jitter=getattr(self.args, "delay_jitter", 0),
-            timeout=getattr(self.args, "metrics_timeout", 40),
-            expected_user_id=getattr(self.args, "expected_ig_user_id", "") or "",
-            tab=getattr(self.args, "browser_tab", 0) or None,
-            window=getattr(self.args, "browser_window", 0) or None,
-            log=log)
-        return counts.get(shortcode) or {}
-
-    def tiktok(self, url):
-        return social_metrics.collect_tiktok(tiktok_info(url, self.args))
-
-
-def social_collector(args):
-    """取当前批次的采集器，同一批次复用同一份登录态。"""
-    collector = getattr(args, "_social_collector", None)
-    if collector is None:
-        collector = SocialCollector(args)
-        setattr(args, "_social_collector", collector)
-    return collector
-
-
-def tiktok_info(url, args):
-    """只取 yt-dlp 的 info，不下载媒体；用于刷新 TikTok 计数。"""
-    command = [tool("yt-dlp"), "--ignore-config", "--no-playlist", "--no-warnings",
-               "--skip-download", "--print", "%()j"]
-    if getattr(args, "proxy", ""):
-        command += ["--proxy", args.proxy]
-    if getattr(args, "cookies_from_browser", ""):
-        command += ["--cookies-from-browser", args.cookies_from_browser]
-    command += ["--", url]
-    output = run(command, getattr(args, "timeout", 300))
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            return json.loads(line)
-    raise ValueError("yt-dlp did not return TikTok info")
-
-
 def identify(raw, resolve_short=True):
     url = urlparse(raw.strip())
     host = (url.hostname or "").lower()
@@ -211,13 +138,13 @@ def identify(raw, resolve_short=True):
 
 
 @contextmanager
-def locked(directory):
+def locked(directory, message="This video is already being processed"):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".lock").open("a") as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise RuntimeError("This video is already being processed") from None
+            raise RuntimeError(message) from None
         yield
 
 
@@ -382,11 +309,13 @@ def preview(path, media, directory):
 
 
 def build_ytdlp_command(url, directory, args):
-    """拼出 yt-dlp 命令。限速选项只在显式传入时生效，默认行为不变。"""
+    """Download only; do not expand comments, playlists or retry extraction."""
     command = [
         tool("yt-dlp"), "--ignore-config", "--no-playlist", "--no-progress",
-        "--no-warnings", "--socket-timeout", "25", "--retries", "1",
-        "--fragment-retries", "1", "--abort-on-unavailable-fragments",
+        "--no-warnings", "--socket-timeout", "25", "--retries", "0",
+        "--extractor-retries", "0", "--fragment-retries", "0",
+        "--no-write-comments", "--concurrent-fragments", "1",
+        "--abort-on-unavailable-fragments",
         "--max-filesize", str(MAX_BYTES), "-f", FORMAT, "-S", SORT, "--format-sort-force",
         "--ffmpeg-location", str(Path(tool("ffmpeg")).parent),
         "--merge-output-format", "mp4/mkv", "--remux-video", "mp4",
@@ -418,16 +347,6 @@ def download_ytdlp(url, directory, args):
     path = Path(info["filepath"]).resolve()
     if path.parent != directory.resolve() or not path.is_file():
         raise ValueError("Downloader did not produce a file in the expected directory")
-    # 社交计数：TikTok 的点赞/评论/分享/收藏/播放随 info 一起返回，直接取用，不再发请求；
-    # Instagram 只有点赞和评论在 info 里，完整六项由 prepare 阶段的 REST 采集补齐。
-    counts = social_metrics.collect_tiktok(info) if getattr(args, "platform", "") == "tiktok" else {
-        "like": info.get("like_count"), "comment": info.get("comment_count"),
-        "repost": None, "share": None, "save": None, "play": None,
-    }
-    metrics = {}
-    if social_metrics.has_metrics(counts):
-        source = social_metrics.SOURCE_TIKTOK if getattr(args, "platform", "") == "tiktok" else "instagram-ytdlp"
-        metrics = social_metrics.build_snapshot(getattr(args, "platform", "") or "instagram", counts, source)
     # Retain descriptive metadata only, never signed CDN URLs, cookies or request headers.
     return path, {
         "engine": "yt-dlp", "remoteId": str(info.get("id", "")),
@@ -437,7 +356,6 @@ def download_ytdlp(url, directory, args):
         "formatId": info.get("format_id"), "expectedDuration": info.get("duration"),
         "expectedAudio": info.get("acodec") not in (None, "none"),
         "qualityPolicy": "highest available resolution, then fps and bitrate",
-        "socialMetrics": metrics,
     }
 
 
@@ -660,13 +578,8 @@ def prepare_one(raw, args):
                 # WeChat Channels has no public download API; the desktop agent owns the session.
                 engines = [("weixin-agent", args)]
             elif args.engine == "auto":
+                # Legacy alias: never silently change accounts or download engines.
                 engines = [("yt-dlp", args)]
-                if (not args.cookies_from_browser and not args.no_clipdock_cookies
-                        and CLIPDOCK_PROFILE.is_dir()):
-                    authenticated = argparse.Namespace(**vars(args))
-                    authenticated.cookies_from_browser = f"chrome:{CLIPDOCK_PROFILE}"
-                    engines.append(("yt-dlp (ClipDock session)", authenticated))
-                engines.append(("clipdock", args))
             for engine, engine_args in engines:
                 try:
                     log(f"{platform}/{video_id}: downloading with {engine}")
@@ -686,8 +599,9 @@ def prepare_one(raw, args):
                             raise ValueError("Downloaded duration does not match the source")
                         if metadata.get("expectedAudio") and not media["audioCodecs"]:
                             raise ValueError("Source has audio but downloaded file does not")
-                        if platform == "tiktok" and metadata.get("remoteId", video_id) != video_id:
-                            raise ValueError("Downloaded TikTok ID does not match the requested video")
+                        if engine.startswith("yt-dlp") and platform in ("instagram", "tiktok"):
+                            if metadata.get("remoteId") != video_id:
+                                raise ValueError("Downloaded video ID does not match the requested video")
                         delivered, delivery_media = delivery_copy(path, media, attempt / "compatible.mp4")
                         sheet = preview(delivered, delivery_media, attempt)
                         checksum = digest(delivered)
@@ -720,26 +634,6 @@ def prepare_one(raw, args):
                     log(message)
             else:
                 raise RuntimeError("; ".join(errors))
-        if platform == "instagram" and not getattr(args, "no_social_metrics", False):
-            # Instagram 的六项计数要单独走移动端 REST 接口；抓不到不阻断下载，
-            # 缺失原因留在 state 里，事后可以用 metrics 子命令补抓。
-            # 直连接口被风控时（--metrics-engine browser）改在真实 Chrome 页面内发同源请求。
-            try:
-                if getattr(args, "metrics_engine", "rest") == "browser":
-                    counts = social_collector(args).instagram_browser(video_id)
-                else:
-                    counts = social_collector(args).instagram(video_id)
-                state["socialMetrics"] = social_metrics.build_snapshot(
-                    "instagram", counts, social_metrics.SOURCE_INSTAGRAM)
-                state.pop("socialMetricsError", None)
-                log(f"{platform}/{video_id}: social metrics {state['socialMetrics']}")
-            except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError):
-                # 账号被要求验证或登录态不对：整批停下，别再下载并请求后面的条目。
-                # 下载成果在计数之前已经落盘，这里直接抛出去，不吞掉。
-                raise
-            except Exception as error:
-                state["socialMetricsError"] = safe_error(error)
-                log(f"{platform}/{video_id}: social metrics unavailable: {safe_error(error)}")
         if platform == "weixin" and not getattr(args, "keep_channels_page", False):
             # The Channels tab keeps autoplaying with sound; close it unless the
             # caller wants the page to stay open for the next link.
@@ -768,11 +662,10 @@ def prepare_one(raw, args):
 
 
 def pace_pause(delay, jitter):
-    """算出这一轮要停多久。抖动让间隔看起来像人在操作，而不是定时器。"""
-    delay = float(delay or 0)
-    jitter = float(jitter or 0)
-    if delay <= 0:
-        return 0
+    """Spread requests out; random delays do not guarantee rate-limit immunity."""
+    delay, jitter = float(delay), float(jitter)
+    if not math.isfinite(delay) or not math.isfinite(jitter) or delay < 30 or jitter < 0:
+        raise ValueError("Download delay must be >= 30 seconds and jitter must be finite and >= 0")
     return delay + random.uniform(0, jitter)
 
 
@@ -787,36 +680,52 @@ def verify_browser_account(args):
     source = str(getattr(args, "cookies_from_browser", "") or "").strip()
     if not expected or not source:
         return
-    social_metrics.export_browser_cookies(
+    browser_session.export_browser_cookies(
         source, tool("yt-dlp"), proxy=getattr(args, "proxy", "") or None,
         timeout=getattr(args, "timeout", 300), expected_user_id=expected)
 
 
 def prepare(args):
+    state_root = Path(os.environ.get("AIGC_WORKBENCH_STATE_DIR") or
+                      str(Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser() /
+                          "aigc-workbench")).expanduser()
+    # One shared lock/cooldown also covers separate processes and different --root values.
+    with locked(state_root / "video-download-pacing", "Another video download batch is running"):
+        return prepare_serial(args, state_root / "video-download-pacing" / "cooldown.json")
+
+
+def prepare_serial(args, cooldown_file):
+    delay, jitter = getattr(args, "delay", 30), getattr(args, "delay_jitter", 30)
+    pace_pause(delay, jitter)
     verify_browser_account(args)
     items, errors, seen = [], [], set()
+    not_attempted = []
     for index, raw in enumerate(args.urls):
-        if index:
-            pause = pace_pause(getattr(args, "delay", 0), getattr(args, "delay_jitter", 0))
-            if pause:
-                log(f"pacing: waiting {pause:.0f}s before the next download")
-                time.sleep(pause)
         try:
+            # URL resolution can itself make a request (e.g. TikTok short links).
+            if cooldown_file.exists():
+                wait_until = float(read_json(cooldown_file)["nextAllowedAt"])
+                pause = wait_until - time.time()
+                if pause > 0:
+                    log(f"pacing: waiting {pause:.1f}s before the next download")
+                    time.sleep(pause)
             platform, video_id, _ = identify(raw)
             key = (platform, video_id)
             if key in seen:
                 continue
             seen.add(key)
             items.append(prepare_one(raw, args))
-        except social_metrics.AccountChallengeError as error:
-            # 账号被要求验证：立刻停掉整批，剩下的链接不再下载也不再请求。
-            errors.append({"sourceUrl": raw, "error": safe_error(error)})
-            write_json(args.report, {"items": items, "errors": errors})
-            break
         except Exception as error:
-            errors.append({"sourceUrl": raw, "error": safe_error(error)})
-        write_json(args.report, {"items": items, "errors": errors})
-    print(json.dumps({"report": str(args.report), "items": items, "errors": errors}, ensure_ascii=False, indent=2))
+            errors.append({"sourceUrl": raw, "status": "stopped", "error": safe_error(error)})
+            not_attempted = args.urls[index + 1:]
+            log("Download batch stopped; remaining URLs were not attempted")
+        finally:
+            write_json(cooldown_file, {"nextAllowedAt": time.time() + pace_pause(delay, jitter)})
+            write_json(args.report, {"items": items, "errors": errors, "notAttempted": not_attempted})
+        if errors:
+            break
+    print(json.dumps({"report": str(args.report), "items": items, "errors": errors,
+                      "notAttempted": not_attempted}, ensure_ascii=False, indent=2))
     return int(bool(errors))
 
 
@@ -958,7 +867,7 @@ def upload_one(item, client):
             for key, value in metadata.items():
                 if key == "socialMetrics" and not asset.get("socialMetrics"):
                     # 服务端还没上线 social_metrics 列：保留本地快照，不阻断上传，
-                    # 上线后用 metrics 子命令回填即可。
+                    # 保留历史/用户提供的数据，但不向来源平台请求计数。
                     warnings.append("服务端尚未支持 socialMetrics 字段，计数只保留在本地")
                     continue
                 equal = set(asset.get(key, [])) == set(value) if key == "tags" else asset.get(key) == value
@@ -1029,114 +938,6 @@ def refresh(args):
     return int(bool(errors))
 
 
-def metrics(args):
-    """重新采集平台社交计数，并回写已上传的素材。
-
-    计数是抓取时刻的快照，剪辑决策通常发生在下载之后，所以提供独立入口重抓。
-    """
-    report = read_json(args.manifest)
-    items = report.get("items")
-    if not isinstance(items, list) or not items:
-        raise ValueError("Manifest has no prepared videos")
-    uploader = load_uploader()
-    client = uploader.Client(args.api or uploader.DEFAULT_API, args.cookie_file or uploader.DEFAULT_COOKIE_FILE)
-    client.require("GET", "/api/auth/me")
-    collector = social_collector(args)
-    results = []
-    browser_counts = {}
-    if getattr(args, "metrics_engine", "rest") == "browser":
-        # 浏览器通道一次把这一批都取完：Apple 事件调用少、节奏更接近真人，
-        # 遇到风控也只触发一次整批停止。
-        codes = []
-        for item in items:
-            state = read_json(Path(item["stateFile"]).expanduser().resolve())
-            if state.get("platform") == "instagram" and state.get("videoId"):
-                codes.append(state["videoId"])
-        try:
-            browser_counts = browser_metrics.collect_instagram_in_browser(
-                codes,
-                delay=getattr(args, "delay", 0),
-                jitter=getattr(args, "delay_jitter", 0),
-                timeout=getattr(args, "metrics_timeout", 40),
-                expected_user_id=getattr(args, "expected_ig_user_id", "") or "",
-                tab=getattr(args, "browser_tab", 0) or None,
-                window=getattr(args, "browser_window", 0) or None,
-                log=log)
-        except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError) as error:
-            # 账号被要求验证或登录态不对：整批停下，剩下的一律不采。
-            results = [{"status": "stopped", "sourceUrl": item.get("sourceUrl"),
-                        "error": safe_error(error)} for item in items]
-            write_json(args.results, {"results": results})
-            print(json.dumps({"results": results, "resultsFile": str(args.results)},
-                             ensure_ascii=False, indent=2))
-            return 1
-    for index, item in enumerate(items):
-        if index:
-            pause = pace_pause(getattr(args, "delay", 0), getattr(args, "delay_jitter", 0))
-            if pause:
-                log(f"pacing: waiting {pause:.0f}s before the next count")
-                time.sleep(pause)
-        try:
-            state_file = Path(item["stateFile"]).expanduser().resolve()
-            with locked(state_file.parent):
-                state = read_json(state_file)
-                platform = state.get("platform", "")
-                if platform == "instagram":
-                    if getattr(args, "metrics_engine", "rest") == "browser":
-                        counts = browser_counts.get(state.get("videoId", ""))
-                        if not counts:
-                            raise RuntimeError("浏览器采集没有返回这条的计数")
-                    else:
-                        counts = collector.instagram(state.get("videoId", ""))
-                elif platform == "tiktok":
-                    counts = collector.tiktok(state.get("canonicalUrl") or state.get("sourceUrl"))
-                else:
-                    raise ValueError(f"平台 {platform or '未知'} 没有可采集的社交计数")
-                snapshot = social_metrics.build_snapshot(
-                    platform, counts,
-                    social_metrics.SOURCE_INSTAGRAM if platform == "instagram" else social_metrics.SOURCE_TIKTOK)
-                if not social_metrics.has_metrics(snapshot):
-                    raise RuntimeError("平台没有返回任何计数")
-                state["socialMetrics"] = snapshot
-                state.pop("socialMetricsError", None)
-                write_json(state_file, state)
-                item["socialMetrics"] = snapshot
-                asset_id = state.get("asset", {}).get("id")
-                pushed = None
-                push_error = ""
-                if asset_id:
-                    try:
-                        body = json.dumps({"socialMetrics": snapshot}).encode("utf-8")
-                        status, payload = client.request(
-                            "PATCH", f"/api/assets/{asset_id}/organize", body, {"Content-Type": "application/json"})
-                        if status != 200:
-                            raise RuntimeError(f"服务端拒绝写入社交计数：HTTP {status} {payload.get('error', '')}")
-                        pushed = (payload.get("asset") or {}).get("socialMetrics")
-                        if not pushed:
-                            raise RuntimeError("服务端没有回读 socialMetrics，可能尚未上线该字段")
-                        item.setdefault("asset", {})["socialMetrics"] = pushed
-                    except Exception as error:
-                        # 服务端还没上线该字段时，本地快照仍然保留，只是没写回线上。
-                        push_error = safe_error(error)
-            results.append({"status": "updated" if not push_error else "local-only",
-                            "platform": platform, "assetId": asset_id,
-                            "socialMetrics": snapshot, "pushed": pushed, "error": push_error})
-        except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError) as error:
-            # 账号被要求验证或登录态不对：立刻停掉整批。逐条 continue 只会把风控打得更死，
-            # 而且留下的失败结果会让人误以为是单条视频的问题。
-            results.append({"status": "stopped", "sourceUrl": item.get("sourceUrl"),
-                            "error": safe_error(error)})
-            write_json(args.manifest, report)
-            write_json(args.results, {"results": results})
-            break
-        except Exception as error:
-            results.append({"status": "failed", "sourceUrl": item.get("sourceUrl"), "error": safe_error(error)})
-        write_json(args.manifest, report)
-        write_json(args.results, {"results": results})
-    print(json.dumps({"results": results, "resultsFile": str(args.results)}, ensure_ascii=False, indent=2))
-    return int(any(result["status"] not in ("updated", "local-only") for result in results))
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -1144,11 +945,12 @@ def parse_args():
     download.add_argument("urls", nargs="+")
     download.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     download.add_argument("--report", type=Path, required=True)
-    download.add_argument("--engine", choices=("auto", "yt-dlp", "clipdock", "weixin"), default="auto")
+    download.add_argument("--engine", choices=("auto", "yt-dlp", "clipdock", "weixin"), default="yt-dlp",
+                          help="auto is a legacy alias for yt-dlp; no automatic fallback")
     download.add_argument("--proxy", default="")
     download.add_argument("--cookies-from-browser", default="")
     download.add_argument("--no-clipdock-cookies", action="store_true",
-                          help="Do not retry yt-dlp with the existing ClipDock browser profile")
+                          help=argparse.SUPPRESS)
     download.add_argument("--refresh-download", action="store_true",
                           help="Replace the cached file only after a new download passes validation")
     download.add_argument("--clipdock", default="http://127.0.0.1:3457")
@@ -1158,16 +960,15 @@ def parse_args():
                           help="Leave the WeChat Channels page open after the download "
                                "(use it to grab several links per activation, close it at the end)")
     download.add_argument("--no-social-metrics", action="store_true",
-                          help="Do not collect platform social counts (likes, comments, shares, saves)")
-    download.add_argument("--metrics-timeout", type=int, default=40)
-    download.add_argument("--delay", type=float, default=0,
-                          help="Seconds to wait between videos; slows the batch down to avoid rate limiting")
-    download.add_argument("--delay-jitter", type=float, default=0,
-                          help="Extra random seconds added to each wait, up to this value")
+                          help=argparse.SUPPRESS)
+    download.add_argument("--delay", type=float, default=30,
+                          help="Minimum pause after each video, >= 30 seconds (default: 30)")
+    download.add_argument("--delay-jitter", type=float, default=30,
+                          help="Extra random wait from 0 to this many seconds (default: 30)")
     download.add_argument("--ytdlp-sleep-requests", type=int, default=0,
-                          help="yt-dlp sleeps between the downloads of consecutive videos")
+                          help="Additional sleep between extraction requests within yt-dlp")
     download.add_argument("--ytdlp-sleep-interval", type=float, default=0,
-                          help="Maximum seconds yt-dlp waits between requests of the same video")
+                          help="Additional sleep before each media download within yt-dlp")
     download.add_argument("--ytdlp-limit-rate", default="",
                           help="Bandwidth cap for yt-dlp, for example 800K")
     download.add_argument("--timeout", type=int, default=300)
@@ -1187,36 +988,15 @@ def parse_args():
     sync.add_argument("--manifest", type=Path, required=True)
     sync.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
     sync.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
-    counts = sub.add_parser("metrics", help="Re-collect platform social counts and write them back")
-    counts.add_argument("--manifest", type=Path, required=True)
-    counts.add_argument("--results", type=Path, required=True)
-    counts.add_argument("--api", default=os.environ.get("AIGC_SHELF_URL", ""))
-    counts.add_argument("--cookie-file", default=os.environ.get("AIGC_SHELF_COOKIE_FILE", ""))
-    counts.add_argument("--proxy", default="")
-    counts.add_argument("--cookies-from-browser", default="")
-    counts.add_argument("--timeout", type=int, default=300)
-    counts.add_argument("--metrics-timeout", type=int, default=40)
-    counts.add_argument("--delay", type=float, default=0,
-                        help="Seconds to wait between videos; slows the batch down to avoid rate limiting")
-    counts.add_argument("--delay-jitter", type=float, default=0,
-                        help="Extra random seconds added to each wait, up to this value")
-    for _parser in (download, counts):
-        _parser.add_argument(
-            "--expected-ig-user-id", default=os.environ.get("AIGC_IG_USER_ID", ""),
-            help="Expected Instagram ds_user_id for the browser session; collection stops when "
-                 "the browser is signed in to another account, so the main account is never used")
-        _parser.add_argument(
-            "--metrics-engine", choices=("rest", "browser"), default="rest",
-            help="rest: collect counts with a direct API call; browser: ask the real Chrome page "
-                 "for them, which survives the API-level throttling of a fresh account")
-        _parser.add_argument(
-            "--browser-tab", type=int, default=0,
-            help="Chrome tab number (1 based) to run the page request in; 0 uses the active tab "
-                 "of the front Chrome window")
-        _parser.add_argument(
-            "--browser-window", type=int, default=0,
-            help="Chrome window number (1 based); 0 uses the front Chrome window")
+    download.add_argument(
+        "--expected-ig-user-id", default=os.environ.get("AIGC_IG_USER_ID", ""),
+        help="Check the locally selected browser's Instagram ds_user_id before downloading")
     args = parser.parse_args()
+    if args.action == "prepare":
+        try:
+            pace_pause(args.delay, args.delay_jitter)
+        except ValueError as error:
+            parser.error(str(error))
     for field in ("root", "report", "manifest", "results"):
         if getattr(args, field, None) is not None:
             setattr(args, field, getattr(args, field).expanduser().resolve())
@@ -1231,8 +1011,6 @@ def main():
         return upload(args)
     if args.action == "refresh":
         return refresh(args)
-    if args.action == "metrics":
-        return metrics(args)
     if args.action == "verify":
         report = verify_media(args.input.expanduser().resolve())
         if args.report:
