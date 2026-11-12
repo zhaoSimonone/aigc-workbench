@@ -174,10 +174,13 @@ def collect_instagram(shortcode, cookies, proxy=None, timeout=40):
                 body = error.read().decode("utf-8", "replace")
             except Exception:  # noqa: BLE001 - 读不出响应体不影响判断
                 body = ""
-            if "challenge_required" in body:
-                raise AccountChallengeError(
-                    "Instagram 要求账号完成验证（challenge_required）；"
-                    "请立刻停止采集，先在浏览器里处理验证再重试，不要继续请求") from error
+            # challenge_required：账号被要求验证；checkpoint_required：会话被要求过检查点。
+            # 两者都不是单条视频的问题，继续请求只会加重风控，必须整批停下。
+            for marker in ("challenge_required", "checkpoint_required"):
+                if marker in body:
+                    raise AccountChallengeError(
+                        f"Instagram 返回 {marker}，账号或会话被风控；"
+                        "请立刻停止采集，先在浏览器里正常使用该账号并处理验证，再低频重试") from error
             continue
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             continue

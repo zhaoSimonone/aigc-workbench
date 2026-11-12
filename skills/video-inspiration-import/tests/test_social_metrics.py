@@ -212,6 +212,19 @@ class InstagramCountTests(unittest.TestCase):
             with self.assertRaises(metrics_module.AccountChallengeError):
                 metrics_module.collect_instagram("Dfa1yPBq7jZ", {"sessionid": "s"})
 
+    def test_a_checkpoint_is_raised_the_same_way(self):
+        """网页端返回的 checkpoint_required 同样是整批中止的信号。"""
+
+        def fake_get(url, headers, proxy=None, timeout=40):
+            raise urllib.error.HTTPError(
+                url, 400, "Bad Request", {},
+                io.BytesIO(b'{"message":"checkpoint_required"}'))
+
+        with patch.object(metrics_module, "_http_get_json", side_effect=fake_get):
+            with self.assertRaises(metrics_module.AccountChallengeError) as caught:
+                metrics_module.collect_instagram("Dfa1yPBq7jZ", {"sessionid": "s"})
+        self.assertIn("checkpoint_required", str(caught.exception))
+
     def test_an_ordinary_http_error_is_still_treated_as_a_missing_source(self):
         def fake_get(url, headers, proxy=None, timeout=40):
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"{}"))
