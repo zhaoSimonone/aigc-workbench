@@ -62,6 +62,7 @@ SOURCE_HOSTED = "hosted-api"
 # - /v2/user/clips 取 reels，**只接受 user_id + page_id，不接受 username**
 # 返回体是 {"response": {"items": [...], "paging_info": {...}}, "next_page_id": "..."}，
 # 所以解析要往 response.items 里钻一层。
+DEFAULT_SCAVIO_API = "https://api.scavio.dev"
 PATH_PROFILE = "/v2/user/by/username"
 PATH_CLIPS = "/v2/user/clips"
 
@@ -179,9 +180,14 @@ def media_items(payload):
         return []
 
     candidates = [payload]
-    nested = payload.get("response")
-    if isinstance(nested, dict):
-        candidates.insert(0, nested)
+    # HikerAPI: {"response": {...}}；Scavio: {"data": {"data": {"items": [...]}}}
+    for wrapper in ("response", "data"):
+        nested = payload.get(wrapper)
+        if isinstance(nested, dict):
+            candidates.insert(0, nested)
+            deeper = nested.get("data")
+            if isinstance(deeper, dict):
+                candidates.insert(0, deeper)
 
     for container in candidates:
         for key in _REELS_CONTAINER_KEYS:
@@ -221,9 +227,9 @@ def build_snapshot(counts, source=SOURCE_HOSTED, captured_at=None):
     return snapshot
 
 
-def _default_transport(url, headers, timeout):
-    """最朴素的单次 GET。不做任何 TLS 伪装——伪装特征在风控里更刺眼。"""
-    request = urllib.request.Request(url, headers=headers)
+def _default_transport(url, headers, timeout, method="GET", body=None):
+    """最朴素的单次请求。不做任何 TLS 伪装——伪装特征在风控里更刺眼。"""
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read()
@@ -321,6 +327,96 @@ class HostedClient:
         return self._get(PATH_CLIPS, params)
 
 
+class ScavioClient:
+    """Scavio（api.scavio.dev）客户端。
+
+    与 HikerAPI 的差别：
+    - 用 `POST` + JSON body，认证是 `Authorization: Bearer <key>`；
+    - 响应把数据包在 `data` 里，并附 `credits_used` / `credits_remaining`；
+      实测过四个端点在无 key 时返回 401 `Missing Authorization header`，
+      说明路径与认证方式都对。
+    - 计费按 credits：profile 1、reels 每页 1、posts 每页 2、单条 post 2。
+      所以「列表一次拿全」比「逐条查」省一个数量级。
+    """
+
+    def __init__(self, api_key=None, key_env="SCAVIO_API_KEY",
+                 api="https://api.scavio.dev", timeout=40, transport=None):
+        self.key_env = key_env
+        self._api_key = api_key if api_key is not None else os.environ.get(key_env, "")
+        self.api = (api or "https://api.scavio.dev").rstrip("/")
+        self.timeout = timeout
+        self._transport = transport or _default_transport
+
+    @property
+    def has_key(self):
+        return bool(str(self._api_key or "").strip())
+
+    def _headers(self):
+        if not self.has_key:
+            raise HostedAuthError(
+                f"没有找到 Scavio 的 key：把 {self.key_env}=... 写进私密环境文件"
+                "（例如 ~/.minimax/aigc-shelf.env）。注册免费送 50 credits，不需要信用卡。")
+        return {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "accept": "application/json",
+            "user-agent": "aigc-workbench/hosted-metrics",
+        }
+
+    def _post(self, path, body):
+        url = f"{self.api}{path}"
+        status, payload = self._transport(url, self._headers(), self.timeout,
+                                          method="POST", body=json.dumps(body or {}).encode())
+        text = payload.decode("utf-8", "replace") if isinstance(payload, (bytes, bytearray)) else str(payload)
+
+        if status in (401, 403):
+            raise HostedAuthError(
+                f"Scavio 拒绝授权（HTTP {status}）：key 无效或 credits 用尽。"
+                f"服务端原话：{text[:200]}")
+        if status == 402:
+            raise HostedInsufficientFundsError(
+                f"Scavio 返回 402：credits 不足。服务端原话：{text[:200]}。"
+                "免费额度 50 credits，用尽后需在 dashboard 补。")
+        if status == 429:
+            raise HostedRateLimitError(
+                "Scavio 返回 429 限流。不要自动重试——连续重试会把限流打死。")
+        if status >= 400:
+            raise HostedRequestError(f"Scavio 返回 HTTP {status}：{text[:200]}")
+
+        try:
+            return json.loads(text)
+        except ValueError as error:
+            raise HostedRequestError(f"Scavio 返回的不是 JSON：{text[:200]}") from error
+
+    def profile(self, username):
+        return self._post("/api/v1/instagram/profile", {"username": username})
+
+    def _unwrap(self, payload):
+        """Scavio 把数据包在 `data` 里；拿内层，保持与 HikerAPI 一致的用法。"""
+        if isinstance(payload, dict):
+            inner = payload.get("data")
+            if isinstance(inner, dict):
+                return inner
+        return payload
+
+    def user_id(self, username):
+        inner = self._unwrap(self.profile(username))
+        for key in ("pk", "id", "user_id"):
+            value = inner.get(key) if isinstance(inner, dict) else None
+            if value:
+                return str(value)
+        raise HostedRequestError(f"Scavio 账号资料里没有 id 字段：{str(inner)[:200]}")
+
+    def reels(self, username=None, user_id=None, page_id=None):
+        """Scavio 的 reels 端点直接吃 username，不需要先解析 pk（与 HikerAPI 不同）。"""
+        if not username and not user_id:
+            raise ValueError("reels 需要 username 或 user_id")
+        body = {"username": username} if username else {"user_id": str(user_id)}
+        if page_id:
+            body["cursor"] = str(page_id)
+        return self._post("/api/v1/instagram/user/reels", body)
+
+
 def summarize(payload):
     """把一次 reels 响应整理成便于人读与排序的记录列表。"""
     records = []
@@ -345,9 +441,13 @@ def _build_parser():
     ):
         cmd = sub.add_parser(name, help=help_text)
         cmd.add_argument("username")
-        cmd.add_argument("--api", default=DEFAULT_API)
-        cmd.add_argument("--key-env", default=DEFAULT_KEY_ENV,
-                         help=f"存放 key 的环境变量名（默认 {DEFAULT_KEY_ENV}）")
+        cmd.add_argument("--provider", choices=("hiker", "scavio"), default="hiker",
+                         help="hiker=api.hikerapi.com（GET+x-access-key）；"
+                              "scavio=api.scavio.dev（POST+Bearer，免费 50 credits）")
+        cmd.add_argument("--api", default=None,
+                         help="覆盖 API 基址；默认按 provider 选择")
+        cmd.add_argument("--key-env", default=None,
+                         help="存放 key 的环境变量名；默认 hiker→HIKERAPI_KEY，scavio→SCAVIO_API_KEY")
         cmd.add_argument("--timeout", type=int, default=40)
         cmd.add_argument("--out", default="",
                          help="把原始 JSON 写到该文件，便于核对字段名")
@@ -358,7 +458,14 @@ def _build_parser():
 
 def main(argv=None):
     args = _build_parser().parse_args(argv)
-    client = HostedClient(api=args.api, key_env=args.key_env, timeout=args.timeout)
+    if args.provider == "scavio":
+        client = ScavioClient(api=args.api or DEFAULT_SCAVIO_API,
+                              key_env=args.key_env or "SCAVIO_API_KEY",
+                              timeout=args.timeout)
+    else:
+        client = HostedClient(api=args.api or DEFAULT_API,
+                              key_env=args.key_env or DEFAULT_KEY_ENV,
+                              timeout=args.timeout)
 
     try:
         if args.command == "profile":

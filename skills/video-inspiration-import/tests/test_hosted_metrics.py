@@ -241,6 +241,77 @@ class ClientRequestTests(unittest.TestCase):
             client.profile("yuna")
 
 
+def scavio_transport(status=200, payload=None, recorder=None):
+    body = json.dumps(payload if payload is not None else {}).encode("utf-8")
+
+    def transport(url, headers, timeout, method="GET", body=None):
+        if recorder is not None:
+            recorder.append({"url": url, "headers": dict(headers),
+                             "method": method, "body": body})
+        return status, _scavio_body
+
+    _scavio_body = body
+    return transport
+
+
+class ScavioClientTests(unittest.TestCase):
+    def test_missing_key_raises_before_network(self):
+        calls = []
+        client = hm.ScavioClient(api_key="", transport=scavio_transport(200, {}, calls))
+        with self.assertRaises(hm.HostedAuthError) as ctx:
+            client.profile("yuna")
+        self.assertEqual(calls, [])
+        self.assertIn("SCAVIO_API_KEY", str(ctx.exception))
+
+    def test_profile_is_post_with_bearer(self):
+        calls = []
+        client = hm.ScavioClient(api_key=FAKE_KEY,
+                                 transport=scavio_transport(200, {"data": {"pk": "123"}}, calls))
+        client.profile("yunalovescosplay")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["method"], "POST")
+        self.assertEqual(calls[0]["headers"]["Authorization"], f"Bearer {FAKE_KEY}")
+        self.assertIn(b"yunalovescosplay", calls[0]["body"])
+
+    def test_unwrap_data(self):
+        client = hm.ScavioClient(api_key=FAKE_KEY,
+                                 transport=scavio_transport(200, {"data": {"pk": "16998768578"}}))
+        self.assertEqual(client.user_id("yuna"), "16998768578")
+
+    def test_reels_takes_username_directly(self):
+        calls = []
+        client = hm.ScavioClient(api_key=FAKE_KEY,
+                                 transport=scavio_transport(200, {"data": {"items": []}}, calls))
+        client.reels(username="yuna")
+        self.assertEqual(len(calls), 1, "Scavio 的 reels 直接吃 username，不必先解析 pk")
+        self.assertIn(b"yuna", calls[0]["body"])
+
+    def test_401_and_402_and_429(self):
+        for status, exc in ((401, hm.HostedAuthError),
+                            (402, hm.HostedInsufficientFundsError),
+                            (429, hm.HostedRateLimitError)):
+            client = hm.ScavioClient(api_key=FAKE_KEY,
+                                     transport=scavio_transport(status, {"error": "x"}))
+            with self.assertRaises(exc):
+                client.profile("yuna")
+
+    def test_key_not_leaked(self):
+        client = hm.ScavioClient(api_key=FAKE_KEY, transport=scavio_transport(401, {"error": "no"}))
+        with self.assertRaises(hm.HostedAuthError) as ctx:
+            client.profile("yuna")
+        self.assertNotIn(FAKE_KEY, str(ctx.exception))
+
+
+class ScavioShapeTests(unittest.TestCase):
+    def test_media_items_handles_double_data_wrapper(self):
+        payload = {"data": {"data": {"items": [{"code": "a"}, {"code": "b"}]}}}
+        self.assertEqual(len(hm.media_items(payload)), 2)
+
+    def test_media_items_handles_single_data_wrapper(self):
+        payload = {"data": {"items": [{"code": "a"}]}}
+        self.assertEqual(len(hm.media_items(payload)), 1)
+
+
 class SummarizeTests(unittest.TestCase):
     def test_summarize_records(self):
         payload = {"items": [
