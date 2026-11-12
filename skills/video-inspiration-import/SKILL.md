@@ -130,6 +130,7 @@ refresh 按已保存素材 ID 从当前账号读取，只更新本地元数据�
 - 登录态只导出一次并按批次复用，导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），不要打印 Cookie 内容。
 - **匿名（零账号接触）路线也可用**：未登录的网页端 GraphQL（`PolarisLoggedOutDesktopWWWPostRootContentQuery` + lsd token + 浏览器 TLS 伪装）能取到公开内容的赞和评，不带任何账号 Cookie，账号零风险。但只对**未设门槛**的内容有效。
 - **受限主页取不到**：创作者主页带年龄门槛（未登录时显示「受限主页」，要求登录并确认年龄）时，四条匿名路线会同时失效——主页只留 og 标签没有内容、embed 是登录墙、网页端 GraphQL 的 `if_not_gated_logged_out` 为空、匿名 yt-dlp 报 `empty media response`。这时必须有一个**已登录且通过年龄确认**的会话，匿名侧再怎么试都拿不到内容。
+- **两条本地通道都要求账号登录态**，所以「不许动任何账号」是硬约束时，本机没有可用路线。这时走托管通道（见下节），把取数动作交给第三方 API。
 - 抓不到不阻断下载：原因写进 `state.socialMetricsError`，视频照常进清单。
 - 计数是**抓取时刻的快照**，会随时间变化；值为 null 表示平台没给这个指标，不等于 0，不要当成 0 参与比较。
 - `--no-social-metrics` 可关闭本次采集。
@@ -163,6 +164,30 @@ python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics
 - 一次 `metrics` 把这一批短代码在同一个浏览器会话里跑完，节奏由 `--delay` / `--delay-jitter` 控制；`--browser-tab` / `--browser-window` 可以指定具体标签页和窗口。
 - 这条通道只是换了请求发起的位置，**不改变账号被风控的事实**：账号被停用或在申诉中时，两条通道都拿不到数据。账号一旦出现过 challenge，就不要用这条通道去做「试探性诊断」，先按「风控应急与操作纪律」处理。
 - 使用这条通道前先读「风控应急与操作纪律」：前台应用、焦点确认、账号冷却期都比采集本身重要。
+
+## 托管采集通道（不碰任何账号）
+
+当约束是**「不许用任何 Instagram 账号」**时，两条本地通道都不可用——它们都要带登录态。这时把取数动作交给第三方 Instagram 数据 API：账号池、住宅代理、challenge 处理、重试都在对方基础设施上，本机只发一次普通 HTTPS 请求，不带任何 Instagram Cookie。
+
+```bash
+# 1) 先确认托管侧能否访问这个账号（受限主页在这一步就会暴露）
+python3 /path/to/skills/video-inspiration-import/scripts/hosted_metrics.py profile \
+  yunalovescosplay --out /tmp/profile.json
+
+# 2) 取 reels 列表 + 计数，并整理成可排序的记录
+python3 /path/to/skills/video-inspiration-import/scripts/hosted_metrics.py reels \
+  yunalovescosplay --records --out /tmp/reels.json
+```
+
+- key 放私密环境文件（`~/.minimax/aigc-shelf.env` 里的 `HIKERAPI_KEY=`），用 `set -a; . 文件; set +a` 载入；不要贴在对话里、不要打印、不要进仓库。
+- 输出只含 `social_metrics.METRIC_KEYS` 那六个键，可以直接喂给 `metrics_from_sources()`，不用改上传链路。
+- **视频直链来自 Instagram CDN（scontent 域），不校验账号**：拿到 URL 后本机直接下载，不必再碰 `www.instagram.com`。这是整条链路里最安全的一段。
+- **`play` 口径更好**：网页端把播放量四舍五入成「21.8万」，托管 API 一般给原始整数，做播放量排序比网页读数准。
+- **429 不自动重试**。客户端已把它抛成 `HostedRateLimitError` 并立即返回（退出码 3）；连续重试正是把限流打死的做法。401/403 抛 `HostedAuthError`（退出码 2），表示 key 无效或额度耗尽。
+- 字段名各家不一致，`normalize_counts` 用候选别名表匹配（含 `like_count`/`likes`/`edge_liked_by.count`、`play_count`/`view_count`/`video_view_count`/`videoViewCount` 等）。第一次接某家 API 时先用 `--out` 把原始 JSON 存下来核对字段名，别凭猜。
+- **未验证项**：托管 API 对「年龄门槛受限主页」是否放行，取决于对方的账号池是否已通过年龄确认，实测前不要假定可行。先跑 `profile` 看返回，拿不到就停，不要换着花样试。
+- 这条通道的成本要算清楚：一次 profile + 2–4 次分页 + 每条一次详情，40 帖量级约 50–100 次请求。多数家的免费额度够跑一批，超出后按每千次计费。
+- 托管通道**不改变**内容是否受限的事实：对方拿不到就是拿不到，本机再换路线也不会有结果。
 
 ## 慢速下载与账号保护
 
