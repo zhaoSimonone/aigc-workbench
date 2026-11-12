@@ -219,9 +219,11 @@ class HostedClient:
         text = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body)
 
         if status in (401, 403):
+            # 把服务端原话带上：它通常会指明缺的是哪种授权方式，
+            # 比我们自己猜「key 无效」有用得多。
             raise HostedAuthError(
-                f"托管 API 拒绝授权（HTTP {status}）：key 无效或额度已耗尽。"
-                "不要重试，先确认账户余额与 key。")
+                f"托管 API 拒绝授权（HTTP {status}）：key 无效、额度耗尽，或授权方式不对。"
+                f"服务端原话：{text[:200]}。不要重试，先确认账户余额与 key 的传递方式。")
         if status == 429:
             raise HostedRateLimitError(
                 "托管 API 返回 429 限流。不要自动重试——连续重试会把限流打死；"
