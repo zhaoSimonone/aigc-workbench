@@ -185,7 +185,29 @@ python3 /path/to/skills/video-inspiration-import/scripts/hosted_metrics.py reels
 - **`play` 口径更好**：网页端把播放量四舍五入成「21.8万」，托管 API 一般给原始整数，做播放量排序比网页读数准。
 - **429 不自动重试**。客户端已把它抛成 `HostedRateLimitError` 并立即返回（退出码 3）；连续重试正是把限流打死的做法。401/403 抛 `HostedAuthError`（退出码 2），表示 key 无效或额度耗尽。
 - 字段名各家不一致，`normalize_counts` 用候选别名表匹配（含 `like_count`/`likes`/`edge_liked_by.count`、`play_count`/`view_count`/`video_view_count`/`videoViewCount` 等）。第一次接某家 API 时先用 `--out` 把原始 JSON 存下来核对字段名，别凭猜。
-- **未验证项**：托管 API 对「年龄门槛受限主页」是否放行，取决于对方的账号池是否已通过年龄确认，实测前不要假定可行。先跑 `profile` 看返回，拿不到就停，不要换着花样试。
+- **未验证项（2026-11-12 已实测澄清，见下节）**：托管 API 对「年龄门槛受限主页」是否放行，取决于对方的账号池是否已通过年龄确认。先跑 `profile` 看返回，拿不到就停，不要换着花样试。
+
+### 实测记录：Scavio 对年龄门槛账号（2026-11-12）
+
+目标账号 `yunalovescosplay` 是年龄门槛主页，本地匿名路线（yt-dlp / embed / oEmbed）全部拿不到内容。实测 Scavio 表现：
+
+| 端点 | 结果 | 消耗 |
+|---|---|---|
+| `POST /api/v1/instagram/profile` | ✅ 通：拿到 pk、粉丝 2,527、`is_private=false` | 1 credit |
+| `POST /api/v1/instagram/user/reels` | ❌ **返回 `items: []`**（clips 连接为空，不是报错） | 2 credits |
+| `POST /api/v1/instagram/user/posts` | ✅ **通**：每页 12 条，4 页共 40 条，每条含 `play_count` / `like_count` / `comment_count` / `video_url` | 2 credits/页 |
+
+**结论：reels 端点取不到就直接改用 posts 端点**，不要反复试 reels。posts 的计数和视频直链都在，是更好的入口。40 条实付 13 credits（profile 1 + reels 空跑 2 + posts 4 页 10）。
+
+**这个 720p 限制要提前告知用户**：Scavio 返回的 `video_url` 和 `video_versions` 里都只有 720×1280 一档，`efg` 参数也写明 `720`。而 yt-dlp 走登录态能拿 1080×1920。要高清得换通道，托管通道做不到。
+
+**CDN 直链下载要点**：
+
+- 直链是 scontent 域签名 URL，**不校验账号**，`curl -L -o out.mp4 '<url>'` 即可，无需任何 cookie。
+- 从国内**必须走代理**：CDN 直连超时。用代理时吞吐强依赖节点，实测同一条链接在不同节点上 10 KB/s 与 75 KB/s 相差 7 倍（用户另一台机器同链接 467 KB/s）。
+- 单连接 `urllib` 拉 40 条约 15 分钟；并发 3 线程可显著缩短。**yt-dlp 的多分片并行正是它更快的原因**，纯 HTTP GET 拿不到这个加速。
+- 签名 URL 带 `oe=<hex 时间戳>`，大约 34 小时有效期；过期要重新调 API 取。
+
 - 这条通道的成本要算清楚：一次 profile + 2–4 次分页 + 每条一次详情，40 帖量级约 50–100 次请求。多数家的免费额度够跑一批，超出后按每千次计费。
 - 托管通道**不改变**内容是否受限的事实：对方拿不到就是拿不到，本机再换路线也不会有结果。
 
