@@ -199,7 +199,13 @@ python3 /path/to/skills/video-inspiration-import/scripts/hosted_metrics.py reels
 
 **结论：reels 端点取不到就直接改用 posts 端点**，不要反复试 reels。posts 的计数和视频直链都在，是更好的入口。40 条实付 13 credits（profile 1 + reels 空跑 2 + posts 4 页 10）。
 
-**这个 720p 限制要提前告知用户**：Scavio 返回的 `video_url` 和 `video_versions` 里都只有 720×1280 一档，`efg` 参数也写明 `720`。而 yt-dlp 走登录态能拿 1080×1920。要高清得换通道，托管通道做不到。
+**这个 720p 限制要提前告知用户，但不要说成「匿名只能 720p」**（2026-11-12 实测澄清）：
+
+- **匿名本身能拿 1080p**。用公开非受限账号实测匿名 yt-dlp，DASH 四档齐全（360/540/720/1080×1920），1080p 完全可下。
+- **720p 是「progressive MP4」这一档的固有上限**，不是匿名的上限。Instagram 把 1080p 只放在 DASH 的 video-only 流里，progressive URL 最高 720p。
+- **Scavio 只透传 progressive**：`video_url` 与 `video_versions` 全是 720×1280，`video_dash_manifest` 恒为 `None`（posts 与单条 post 两个端点都验过），而 `is_dash_eligible` 却是 `1`。也就是说 manifest 存在于 IG 侧，但被它的归一化层丢掉了。
+- 所以对这个账号，**720p 是「Scavio 这条路」的上限**，不是「不登录」的上限。要 1080p 只有两条：① 登录态 yt-dlp（走 DASH）；② 换一家会透传 `video_dash_manifest` 的托管（HikerAPI 的 Media 模型里有这个字段，但起充 3000 卢布）。
+- 动手前先分清要下多少条真有损失：`original_width/height` 才是上传原片尺寸。实测该账号 40 条里 **28 条原片是 1080p（有损失）**、12 条本来就是 720p（无损失）。拿 720p 之前先把这个数算出来告诉用户。
 
 **CDN 直链下载要点**：
 
