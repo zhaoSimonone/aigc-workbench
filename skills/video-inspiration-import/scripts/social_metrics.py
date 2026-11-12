@@ -21,6 +21,17 @@ from pathlib import Path
 
 METRIC_KEYS = ("like", "comment", "repost", "share", "save", "play")
 
+# 每个计数字段对应接口里的字段名。不同 app-id / host 返回的字段不一样，
+# 所以按来源顺序合并，缺的那项由下一个来源补上。
+METRIC_FIELDS = (
+    ("like", "like_count"),
+    ("comment", "comment_count"),
+    ("repost", "media_repost_count"),
+    ("share", "reshare_count"),
+    ("save", "save_count"),
+    ("play", "play_count"),
+)
+
 
 class AccountChallengeError(RuntimeError):
     """Instagram 要求账号完成验证。
@@ -155,6 +166,21 @@ def _instagram_info(pk, app_id, user_agent, cookies, referer, host="i.instagram.
     return items[0] if isinstance(items, list) and items else payload
 
 
+def metrics_from_sources(sources):
+    """从多个响应来源里取计数字段，第一个非空的值优先。
+
+    REST 通道和浏览器内同源请求返回的字段名一致，所以两边共用这一份合并逻辑。
+    """
+    def pick(key):
+        for source in sources:
+            value = source.get(key)
+            if value is not None:
+                return int(value)
+        return None
+
+    return {name: pick(field) for name, field in METRIC_FIELDS}
+
+
 def collect_instagram(shortcode, cookies, proxy=None, timeout=40):
     """采集 Instagram 帖子的点赞/评论/转发/分享/收藏/播放。"""
     pk = shortcode_to_pk(shortcode)
@@ -187,21 +213,7 @@ def collect_instagram(shortcode, cookies, proxy=None, timeout=40):
     if not sources:
         raise RuntimeError(f"Instagram 计数接口没有返回数据：{shortcode}")
 
-    def pick(key):
-        for source in sources:
-            value = source.get(key)
-            if value is not None:
-                return int(value)
-        return None
-
-    return {
-        "like": pick("like_count"),
-        "comment": pick("comment_count"),
-        "repost": pick("media_repost_count"),
-        "share": pick("reshare_count"),
-        "save": pick("save_count"),
-        "play": pick("play_count"),
-    }
+    return metrics_from_sources(sources)
 
 
 def collect_tiktok(info):

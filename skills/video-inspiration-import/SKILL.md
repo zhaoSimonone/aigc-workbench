@@ -126,7 +126,7 @@ refresh 按已保存素材 ID 从当前账号读取，只更新本地元数据�
 下载时顺手采集来源平台的互动数据（点赞/评论/转发/分享/收藏/播放），写进 `state.json`、清单的 `socialMetrics`，上传时随素材入库，供后续剪辑挑素材用。
 
 - **TikTok**：yt-dlp 解析时已经带回点赞、评论、分享、收藏、播放五项，直接取用，不额外发请求。TikTok 不区分转发与分享，`repost` 记 null。
-- **Instagram**：必须单独走移动端 REST 接口，且要两套 app-id 合并才有完整六项（`567310203415052` 给收藏/分享/播放，`936619743392459` 给转发）；Web 端 GraphQL 不返回收藏数。因此 Instagram 必须带 `--cookies-from-browser` 和能出网的 `--proxy`，否则计数抓不到。`--cookies-from-browser` 用采集账号所在的浏览器 profile（见下节「Instagram 采集账号护栏」），不要指向主账号的浏览器。
+- **Instagram**：必须单独走移动端 REST 接口，且要两套 app-id 合并才有完整六项（`567310203415052` 给收藏/分享/播放，`936619743392459` 给转发）；Web 端 GraphQL 不返回收藏数。因此 Instagram 必须带 `--cookies-from-browser` 和能出网的 `--proxy`，否则计数抓不到。`--cookies-from-browser` 用采集账号所在的浏览器 profile（见下节「Instagram 采集账号护栏」），不要指向主账号的浏览器。直连接口被风控时改用浏览器内采集通道（见下节）。
 - 登录态只导出一次并按批次复用，导出本身不联网（yt-dlp 读浏览器 cookie 文件即可），不要打印 Cookie 内容。
 - 抓不到不阻断下载：原因写进 `state.socialMetricsError`，视频照常进清单。
 - 计数是**抓取时刻的快照**，会随时间变化；值为 null 表示平台没给这个指标，不等于 0，不要当成 0 参与比较。
@@ -143,6 +143,24 @@ python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics
 
 metrics 按清单逐条重抓，更新 state 与清单，并 `PATCH` 已上传素材的 `socialMetrics`；未上传的只更新本地。服务端尚未上线该字段时报错，不会静默丢弃。
 
+## 浏览器内采集通道
+
+直连接口被风控时（`challenge_required` / `checkpoint_required`），可以让**真实 Chrome 的 Instagram 页面**自己发同源请求去取计数：
+
+```bash
+python3 /path/to/skills/video-inspiration-import/scripts/import_video.py metrics \
+  --manifest "/absolute/path/batch.json" \
+  --results "/absolute/path/batch-metrics.json" \
+  --metrics-engine browser --delay 3 --delay-jitter 2
+```
+
+- **原理**：脚本直连时请求特征（TLS/HTTP2 指纹、header 组合、调用节奏）和浏览器不一样，容易被判成自动化流量；页面里发出的同源请求自带浏览器指纹、完整 Cookie 和 CSRF token，referer 还是同源页面，平台看到的就是网页自己的正常请求。页面本身就在 `www.instagram.com`，同源 fetch 不走 CORS 校验，能直接读到响应体；跨域到 `i.instagram.com` 会被 CORS 挡住，只能拿到 opaque 响应。
+- **一次性前置**：Chrome 菜单「显示 → 开发者 → 允许来自 Apple 事件的 JavaScript」。不开这个开关，AppleScript 会被 Chrome 拒绝（错误码 -1723），脚本会把这个开关怎么点原样报出来。
+- **采集时**：把 Chrome 前台窗口的**活动标签页停在 Instagram 页面**上。脚本先读页面里的 `ds_user_id` 核对账号，不符就整批停下，和 `--expected-ig-user-id` 是同一道护栏，主账号不会被误用。
+- 页面停在 `/accounts/suspended/`（账号已被停用）时直接整批停止，不会再发请求。
+- 一次 `metrics` 把这一批短代码在同一个浏览器会话里跑完，节奏由 `--delay` / `--delay-jitter` 控制；`--browser-tab` / `--browser-window` 可以指定具体标签页和窗口。
+- 这条通道只是换了请求发起的位置，**不改变账号被风控的事实**：账号被停用或在申诉中时，两条通道都拿不到数据。
+
 ## 慢速下载与账号保护
 
 Instagram 对高频请求很敏感，连续抓取容易被判为爬虫、触发限流甚至影响账号。批量采集时**优先不带账号 Cookie 匿名下载**（`--cookies-from-browser` 不传），账号零接触；匿名拿不到时才考虑登录态，并放慢节奏：
@@ -157,11 +175,14 @@ Instagram 对高频请求很敏感，连续抓取容易被判为爬虫、触发�
 
 `metrics` 子命令同样支持 `--delay` / `--delay-jitter`，因为它用的是账号登录态。计数接口出现 429/403 时立即停止，不要重试轰炸；采集失败只记 `socialMetricsError`，不影响下载。
 
-**账号被要求验证（challenge）时整批停掉**：Instagram 对「刚注册的新号 + 脚本直连移动端 REST 接口」这种组合很容易返回 `challenge_required`（移动端 `i.instagram.com`）或 `checkpoint_required`（网页端 `www.instagram.com`）。两者都不是账号被封——**浏览器里同一个账号往往完全正常**，能刷 feed、看 Reels、点主页。脚本会识别这两个响应并**中止整批**：`prepare` 停掉剩下的下载，`metrics` 停掉剩下的请求，结果记成 `stopped` 而不是普通 `failed`。不要重试轰炸，先按下面的顺序判断：
+**账号被要求验证（challenge）时整批停掉**：Instagram 对「刚注册的新号 + 脚本直连移动端 REST 接口」这种组合很容易返回 `challenge_required`（移动端 `i.instagram.com`）或 `checkpoint_required`（网页端 `www.instagram.com`）。脚本会识别这两个响应并**中止整批**：`prepare` 停掉剩下的下载，`metrics` 停掉剩下的请求，结果记成 `stopped` 而不是普通 `failed`。不要重试轰炸，先按下面的顺序判断：
+
+多数情况下账号本身没被封——**浏览器里同一个账号往往完全正常**，能刷 feed、看 Reels、点主页。但一定要看 challenge 的跳转目标：跳到 `accounts/suspended` 说明账号已经被停用，这时继续采集只会让停用更彻底。
 
 | 探测 | 结论 | 做法 |
 | --- | --- | --- |
-| 浏览器里主页/Feed 正常 + 移动端 `challenge_required` | 接口层风控，账号没事 | 让账号像个真人：手动刷 Feed、看 Reels、点赞、关注、发一条内容，隔几天再用移动端接口低频重试 |
+| 浏览器里主页/Feed 正常 + 移动端 `challenge_required` | 接口层风控，账号没事 | 让账号像个真人：手动刷 Feed、看 Reels、点赞、关注、发一条内容，隔几天再用移动端接口低频重试；也可以换浏览器内采集通道（见上节） |
+| 浏览器跳到 `instagram.com/accounts/suspended/`，页面显示申诉进度 | 账号已被停用 | 只能等申诉结果；期间不要发任何采集请求，也不要用脚本过验证码 |
 | 浏览器里也跳验证页 | 账号被要求验证 | 先在浏览器里把验证做完 |
 | 网页端 `checkpoint_required` + 浏览器正常 | 会话可信度不足 | 同第一行；网页端 GraphQL 也拿不到收藏/分享/转发/播放，只能补赞与评 |
 
@@ -175,6 +196,7 @@ Instagram 对高频请求很敏感，连续抓取容易被判为爬虫、触发�
 - 主账号 `itslumiaoi` 只在浏览器里手动登录，**不用于任何下载或计数请求**。
 - 护栏：`prepare` / `metrics` 在开始前会核对浏览器登录态的 `ds_user_id`，与期望账号不符直接报错退出，不发任何请求。期望值来自环境变量 `AIGC_IG_USER_ID`（也可用 `--expected-ig-user-id` 覆盖）。没设这个变量时不校验。
 - 核对只读本地 cookie 库，不联网，也不打印 Cookie 内容。
+- 浏览器内采集通道核对的是页面里的 `ds_user_id`，同样只读不联网。
 - 浏览器里切回主账号后，采集会立刻报错而不是默默用主账号跑——看到报错就去浏览器切回 `simonone.one`。
 
 ## ClipDock 和重试

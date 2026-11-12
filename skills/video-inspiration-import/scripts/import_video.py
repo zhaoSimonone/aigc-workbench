@@ -21,6 +21,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_metrics
 import social_metrics
 
 
@@ -130,6 +131,23 @@ class SocialCollector:
         return social_metrics.collect_instagram(
             shortcode, self.cookies("instagram.com"), proxy=getattr(self.args, "proxy", "") or None,
             timeout=getattr(self.args, "metrics_timeout", 40))
+
+    def instagram_browser(self, shortcode):
+        """在真实 Chrome 页面里取计数：直连接口被风控时走这条通道。
+
+        页面用的就是浏览器自己的登录态，所以这里不再另外导出 cookie；
+        账号身份由页面里的 ds_user_id 校验，主账号不会被误用。
+        """
+        counts = browser_metrics.collect_instagram_in_browser(
+            [shortcode],
+            delay=getattr(self.args, "delay", 0),
+            jitter=getattr(self.args, "delay_jitter", 0),
+            timeout=getattr(self.args, "metrics_timeout", 40),
+            expected_user_id=getattr(self.args, "expected_ig_user_id", "") or "",
+            tab=getattr(self.args, "browser_tab", 0) or None,
+            window=getattr(self.args, "browser_window", 0) or None,
+            log=log)
+        return counts.get(shortcode) or {}
 
     def tiktok(self, url):
         return social_metrics.collect_tiktok(tiktok_info(url, self.args))
@@ -705,14 +723,18 @@ def prepare_one(raw, args):
         if platform == "instagram" and not getattr(args, "no_social_metrics", False):
             # Instagram 的六项计数要单独走移动端 REST 接口；抓不到不阻断下载，
             # 缺失原因留在 state 里，事后可以用 metrics 子命令补抓。
+            # 直连接口被风控时（--metrics-engine browser）改在真实 Chrome 页面内发同源请求。
             try:
-                counts = social_collector(args).instagram(video_id)
+                if getattr(args, "metrics_engine", "rest") == "browser":
+                    counts = social_collector(args).instagram_browser(video_id)
+                else:
+                    counts = social_collector(args).instagram(video_id)
                 state["socialMetrics"] = social_metrics.build_snapshot(
                     "instagram", counts, social_metrics.SOURCE_INSTAGRAM)
                 state.pop("socialMetricsError", None)
                 log(f"{platform}/{video_id}: social metrics {state['socialMetrics']}")
-            except social_metrics.AccountChallengeError:
-                # 账号被要求验证：整批停下，别再下载并请求后面的条目。
+            except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError):
+                # 账号被要求验证或登录态不对：整批停下，别再下载并请求后面的条目。
                 # 下载成果在计数之前已经落盘，这里直接抛出去，不吞掉。
                 raise
             except Exception as error:
@@ -1021,6 +1043,33 @@ def metrics(args):
     client.require("GET", "/api/auth/me")
     collector = social_collector(args)
     results = []
+    browser_counts = {}
+    if getattr(args, "metrics_engine", "rest") == "browser":
+        # 浏览器通道一次把这一批都取完：Apple 事件调用少、节奏更接近真人，
+        # 遇到风控也只触发一次整批停止。
+        codes = []
+        for item in items:
+            state = read_json(Path(item["stateFile"]).expanduser().resolve())
+            if state.get("platform") == "instagram" and state.get("videoId"):
+                codes.append(state["videoId"])
+        try:
+            browser_counts = browser_metrics.collect_instagram_in_browser(
+                codes,
+                delay=getattr(args, "delay", 0),
+                jitter=getattr(args, "delay_jitter", 0),
+                timeout=getattr(args, "metrics_timeout", 40),
+                expected_user_id=getattr(args, "expected_ig_user_id", "") or "",
+                tab=getattr(args, "browser_tab", 0) or None,
+                window=getattr(args, "browser_window", 0) or None,
+                log=log)
+        except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError) as error:
+            # 账号被要求验证或登录态不对：整批停下，剩下的一律不采。
+            results = [{"status": "stopped", "sourceUrl": item.get("sourceUrl"),
+                        "error": safe_error(error)} for item in items]
+            write_json(args.results, {"results": results})
+            print(json.dumps({"results": results, "resultsFile": str(args.results)},
+                             ensure_ascii=False, indent=2))
+            return 1
     for index, item in enumerate(items):
         if index:
             pause = pace_pause(getattr(args, "delay", 0), getattr(args, "delay_jitter", 0))
@@ -1033,7 +1082,12 @@ def metrics(args):
                 state = read_json(state_file)
                 platform = state.get("platform", "")
                 if platform == "instagram":
-                    counts = collector.instagram(state.get("videoId", ""))
+                    if getattr(args, "metrics_engine", "rest") == "browser":
+                        counts = browser_counts.get(state.get("videoId", ""))
+                        if not counts:
+                            raise RuntimeError("浏览器采集没有返回这条的计数")
+                    else:
+                        counts = collector.instagram(state.get("videoId", ""))
                 elif platform == "tiktok":
                     counts = collector.tiktok(state.get("canonicalUrl") or state.get("sourceUrl"))
                 else:
@@ -1067,8 +1121,8 @@ def metrics(args):
             results.append({"status": "updated" if not push_error else "local-only",
                             "platform": platform, "assetId": asset_id,
                             "socialMetrics": snapshot, "pushed": pushed, "error": push_error})
-        except social_metrics.AccountChallengeError as error:
-            # 账号被要求验证：立刻停掉整批。逐条 continue 只会把风控打得更死，
+        except (social_metrics.AccountChallengeError, browser_metrics.AccountMismatchError) as error:
+            # 账号被要求验证或登录态不对：立刻停掉整批。逐条 continue 只会把风控打得更死，
             # 而且留下的失败结果会让人误以为是单条视频的问题。
             results.append({"status": "stopped", "sourceUrl": item.get("sourceUrl"),
                             "error": safe_error(error)})
@@ -1151,6 +1205,17 @@ def parse_args():
             "--expected-ig-user-id", default=os.environ.get("AIGC_IG_USER_ID", ""),
             help="Expected Instagram ds_user_id for the browser session; collection stops when "
                  "the browser is signed in to another account, so the main account is never used")
+        _parser.add_argument(
+            "--metrics-engine", choices=("rest", "browser"), default="rest",
+            help="rest: collect counts with a direct API call; browser: ask the real Chrome page "
+                 "for them, which survives the API-level throttling of a fresh account")
+        _parser.add_argument(
+            "--browser-tab", type=int, default=0,
+            help="Chrome tab number (1 based) to run the page request in; 0 uses the active tab "
+                 "of the front Chrome window")
+        _parser.add_argument(
+            "--browser-window", type=int, default=0,
+            help="Chrome window number (1 based); 0 uses the front Chrome window")
     args = parser.parse_args()
     for field in ("root", "report", "manifest", "results"):
         if getattr(args, field, None) is not None:
