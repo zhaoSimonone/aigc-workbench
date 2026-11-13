@@ -18,6 +18,6 @@ docs/agent-bridge/current-task.md
 docs/agent-bridge/current-result.md
 docs/agent-bridge/state.json
 docs/agent-bridge/history/
-# Keep only the curated work logs; agent scratch state and settings stay local
-/.workbuddy/*
-!/.workbuddy/memory/
+# Agent scratch state, settings and work logs stay local
+# （工作日志会记录内部环境与凭据线索，不再入库）
+/.workbuddy/

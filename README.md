@@ -213,4 +213,4 @@ GET    /api/netdisk/sync-commands        可复制的本机命令
 
 ## 蕾姆视频妆造 Skill
 
-`skills/rem-video-look-designer` 已配置 hairfree 图像接口、`gpt-image-2`、竖屏尺寸、high 质量和 JSON generations 请求。生成脚本只从环境变量读取 `IMAGE_API_KEY`；其余默认值已内置，也可用 `.env.example` 中的 `IMAGE_API_BASE`、`IMAGE_MODEL`、`IMAGE_SIZE`、`IMAGE_QUALITY` 和 `IMAGE_ENDPOINT_MODE` 覆盖。不要把实际密钥写入仓库。
+`skills/rem-video-look-designer` 已配置 OpenAI 兼容图像接口（默认指向通用占位地址，可换成自建或企业代理）、`gpt-image-2`、竖屏尺寸、high 质量和 JSON generations 请求。生成脚本只从环境变量读取 `IMAGE_API_KEY`；其余默认值已内置，也可用 `.env.example` 中的 `IMAGE_API_BASE`、`IMAGE_MODEL`、`IMAGE_SIZE`、`IMAGE_QUALITY` 和 `IMAGE_ENDPOINT_MODE` 覆盖。不要把实际密钥写入仓库。
