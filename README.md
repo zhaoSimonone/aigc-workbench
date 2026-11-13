@@ -78,6 +78,7 @@ aigc list 蕾姆 --folder 角色设定
 aigc download <素材ID> -o ~/Desktop
 aigc upload <文件> --folder 我的创作 --name 标题 --tags "标签1 标签2 标签3"
 aigc pan upload <本地文件或目录> <网盘目录>
+aigc cos upload <本地文件> [COS目录]
 ```
 
 `--output` 可以是目录或完整文件名。名称命中多条时会列出 ID，再用 ID 下载。命令安装到 `~/.local/bin/aigc`；本机没有时执行：
@@ -85,6 +86,35 @@ aigc pan upload <本地文件或目录> <网盘目录>
 ```bash
 ln -sf "$(pwd)/skills/aigc-asset-upload/scripts/aigc.py" ~/.local/bin/aigc
 ```
+
+### COS 命令
+
+CLI 在本机运行，固定上传到 `aigc-1257258774` 桶，支持图片、视频、表格等任意文件类型，保留本地文件名：
+
+```bash
+# 默认上传到 file/ 目录，成功后输出访问链接
+aigc cos upload "./图片.png"
+# 指定桶内目录，也可以用 --path documents
+aigc cos upload "./表格.xlsx" documents
+# 只预览路径，不登录、不上传
+aigc cos upload "./表格.xlsx" documents --dry-run
+# 返回 JSON，访问链接有效期为一小时
+aigc cos upload "./表格.xlsx" --expires 3600 --json
+```
+
+第二个参数始终表示目录，`/` 表示桶根目录。访问链接默认有效 24 小时，`--expires` 支持 1–604800 秒。进度写入 stderr，链接或 JSON 写入 stdout。该命令不创建素材库记录。
+
+默认复用 `aigc login` 保存的会话，通过服务端 `/api/cos/upload-ticket` 申请上传签名，文件直接流式上传到 COS，再由 `/api/cos/finalize-upload` 校验并返回访问链接。此模式无需本机 COS 密钥或 Node.js，长期密钥保留在服务端。**CLI 无需部署到服务器，但会话模式要求服务端已部署这两个授权接口。** 服务端复用已有 `TENCENT_COS_*` 配置；单文件默认上限 2 GiB，由 `MAX_UPLOAD_BYTES` 控制，最多 5 GiB，上传签名有效一小时。默认拒绝覆盖，`--force` 仅允许覆盖当前账号经该接口创建的对象，素材库 UUID 目录不可写入。
+
+已有本机密钥时可用 `--local-credentials`，无需新增服务端接口：
+
+```bash
+aigc cos upload "./图片.png" --local-credentials
+# 指定配置文件也会启用本机密钥模式
+aigc cos upload "./表格.xlsx" --env-file ~/.config/aigc-workbench/cos.env
+```
+
+本机密钥模式需要 Node.js 和 `server` 依赖（`npm ci --prefix server`），使用 SDK 分片上传。配置文件按 `~/.config/aigc-workbench/cos.env`、仓库 `server/.env`、仓库 `.env` 的顺序读取首个存在的文件，环境变量优先。必填 `TENCENT_COS_SECRET_ID`、`TENCENT_COS_SECRET_KEY`；地域通过 `--region` 或 `TENCENT_COS_REGION` 指定，默认 `ap-shanghai`。临时密钥还需 `TENCENT_COS_SECURITY_TOKEN`，其过期可能导致访问链接提前失效。配置文件权限建议为 `600`，不要提交密钥。
 
 ## COS 接入边界
 

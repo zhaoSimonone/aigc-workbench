@@ -1,4 +1,5 @@
 import json
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -60,6 +61,12 @@ class TransportTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'{"asset":{"id":"uploaded"}}')
 
+            def do_PUT(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                self.server.uploaded = (dict(self.headers), body)
+                self.send_response(200)
+                self.end_headers()
+
         self.servers = [ThreadingHTTPServer(("127.0.0.1", 0), Handler) for _ in range(2)]
         for server in self.servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -87,6 +94,20 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 503)
         self.assertIn("max32", str(caught.exception))
         self.assertTrue(caught.exception.headers)
+
+    def test_streaming_put_sends_exact_length_without_cross_origin_cookie(self):
+        from cos_upload import UploadStream
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()), self.client._open(
+            "PUT", f"http://127.0.0.1:{self.servers[1].server_port}/upload",
+            UploadStream(io.BytesIO(b"test-data"), 9),
+            {"Content-Length": "9", "Content-Type": "application/octet-stream"},
+        ) as response:
+            self.assertEqual(response.status, 200)
+        headers, body = self.servers[1].uploaded
+        self.assertEqual(body, b"test-data")
+        self.assertNotIn("Cookie", headers)
+        self.assertNotIn("Transfer-Encoding", headers)
 
     def test_server_failure_does_not_prompt_for_password(self):
         with patch("builtins.input", side_effect=AssertionError("unexpected login")):

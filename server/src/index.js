@@ -12,6 +12,7 @@ const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const COS = require('cos-nodejs-sdk-v5');
+const { createCosRouter } = require('./cos-cli');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || path.resolve(process.cwd(), '.env') });
@@ -106,6 +107,12 @@ async function requireUser(req, res, next) {
 function publicUser(row) {
   return { id: row.id, name: row.name, email: row.email };
 }
+
+app.use('/api/cos', requireUser, createCosRouter({
+  cos, bucket, region,
+  secret: process.env.TENCENT_COS_SECRET_KEY,
+  maxBytes: Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024),
+}));
 
 function objectUrl(key) {
   return new Promise((resolve, reject) => {

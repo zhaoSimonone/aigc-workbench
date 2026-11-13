@@ -230,6 +230,11 @@ def cmd_pan(args):
     return 0 if result is None else result
 
 
+def cmd_cos(args):
+    from cos_upload import main as cos_main
+    return cos_main(list(args.cos_args or []))
+
+
 def cmd_download(args):
     targets = [item for item in list(args.targets or []) + list(args.id or []) if item]
     if args.name:
@@ -279,7 +284,7 @@ def add_common_args(parser):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="aigc",
-        description="查看、下载和上传 AIGC Shelf 素材，也可把本地文件传到百度网盘。只输出文字列表，不预览图片。",
+        description="查看、下载和上传 AIGC Shelf 素材，也可把本地文件传到百度网盘或 COS。只输出文字列表，不预览图片。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -316,6 +321,10 @@ def build_parser():
     pan = sub.add_parser("pan", aliases=["netdisk"], add_help=False, help="上传本地文件或目录到百度网盘")
     pan.add_argument("pan_args", nargs=argparse.REMAINDER)
     pan.set_defaults(func=cmd_pan)
+
+    cos = sub.add_parser("cos", add_help=False, help="上传文件到 COS 并返回访问链接")
+    cos.add_argument("cos_args", nargs=argparse.REMAINDER)
+    cos.set_defaults(func=cmd_cos)
     return parser
 
 
@@ -327,6 +336,8 @@ def main(argv=None):
             return cmd_upload(argparse.Namespace(upload_args=argv[1:]))
         if argv and argv[0] in ("pan", "netdisk"):
             return cmd_pan(argparse.Namespace(pan_args=argv[1:]))
+        if argv and argv[0] == "cos":
+            return cmd_cos(argparse.Namespace(cos_args=argv[1:]))
         parser = build_parser()
         args = parser.parse_args(argv)
         return args.func(args)

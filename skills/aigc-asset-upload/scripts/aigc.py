@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Short CLI for AIGC Shelf and Baidu Netdisk: aigc login | list | download | upload | pan."""
+"""Short CLI for AIGC Shelf, Baidu Netdisk and COS."""
 
 import sys
 from pathlib import Path
