@@ -1,0 +1,14 @@
+interface:
+  display_name: 蓝发角色视频妆造
+  short_description: 自主分析视频与设计妆造，保留固定角色、蓝色、泪痣和双发饰，生成参考图及完整提示词
+  default_prompt: 使用 $bluehair-video-stylist（@蓝发角色视频妆造）分析上传视频，自主设计并生成参考图，保留固定脸、泪痣、蓝色和两个紫色发饰，交付完整
+    CapCut 提示词。
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
