@@ -22,3 +22,7 @@ docs/agent-bridge/history/
 # Agent scratch state, settings and work logs stay local
 # （工作日志会记录内部环境与凭据线索，不再入库）
 /.workbuddy/
+# One-off batch download/verify scripts stay local
+# （内含个人链接清单与本地会话路径，属一次性临时产物）
+tmp-*.py
+tmp-*.sh
