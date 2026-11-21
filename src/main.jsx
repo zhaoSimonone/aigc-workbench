@@ -619,6 +619,9 @@ function Workspace({ user, onLogout }) {
   const [summary, setSummary] = useState({ counts: {}, folders: {}, tags: [], characters: [] });
   const [revision, setRevision] = useState(0);
   const refreshBrowser = () => setRevision((n) => n + 1);
+  // 仅刷新统计计数，不重置素材列表的分页窗口（收藏/使用状态等就地更新用）
+  const [summaryRevision, setSummaryRevision] = useState(0);
+  const refreshSummary = () => setSummaryRevision((n) => n + 1);
   const [videoAccounts, setVideoAccounts] = useState([]);
   const [prompts, setPrompts] = useState([]);
   const [musicTracks, setMusicTracks] = useState([]);
@@ -686,7 +689,7 @@ function Workspace({ user, onLogout }) {
       if (!controller.signal.aborted) setLoadError(`统计加载失败：${error.message}`);
     });
     return () => controller.abort();
-  }, [revision]);
+  }, [revision, summaryRevision]);
 
   useEffect(() => {
     try { sessionStorage.removeItem(`aigc-shelf:assets:v1:${user.id}`); } catch {}
@@ -817,7 +820,7 @@ function Workspace({ user, onLogout }) {
       setAssets((items) => items.map((item) => (item.id === id ? updated : item)));
       setSelected((item) => (item?.id === id ? updated : item));
       setDetailTrail((items) => items.map((item) => (item.id === id ? updated : item)));
-      refreshBrowser();
+      refreshSummary();
     } catch (error) {
       setLoadError(error.message);
     }
@@ -1862,13 +1865,13 @@ function Workspace({ user, onLogout }) {
           onBack={detailTrail.length ? backToPreviousAsset : undefined}
           onDownload={downloadAsset}
           onAssetUpdated={(updated) => {
-            refreshBrowser();
+            refreshSummary();
             setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
             setSelected(updated);
             setDetailTrail((items) => items.map((item) => (item.id === updated.id ? updated : item)));
           }}
           onTagsUpdated={(tags) => {
-            refreshBrowser();
+            refreshSummary();
             const updated = { ...selected, tags };
             setAssets((items) => items.map((item) => (item.id === selected.id ? updated : item)));
             setSelected(updated);
